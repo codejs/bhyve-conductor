@@ -10,7 +10,12 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "bhyve:devices": "tsx src/scripts/bhyve-devices.ts",
+    "bhyve:watch": "tsx src/scripts/bhyve-watch.ts",
+    "bhyve:cmd": "tsx src/scripts/bhyve-cmd.ts",
+    "tuya:devices": "tsx src/scripts/tuya-devices.ts",
+    "sensors:read": "tsx src/scripts/sensors-read.ts"
   },
   "keywords": [],
   "author": "",
@@ -30,5 +35,8 @@
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
   }
 }
