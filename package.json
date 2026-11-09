@@ -18,7 +18,8 @@
     "sensors:read": "tsx src/scripts/sensors-read.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "archive": "rm -f bhyve-conductor.zip && zip -rq bhyve-conductor.zip . -x '.git/*' '*/.git/*' '.idea/*' '*/.idea/*' 'node_modules/*' '*/node_modules/*' '.env' '*/.env' 'bhyve-conductor.zip'"
   },
   "keywords": [],
   "author": "",
