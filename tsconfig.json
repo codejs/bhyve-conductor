@@ -17,6 +17,8 @@
     "exactOptionalPropertyTypes": true,
 
     "verbatimModuleSyntax": true,
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
