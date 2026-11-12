@@ -26,6 +26,11 @@ const EnvSchema = z.object({
   TUYA_SOIL_SENSOR_IDS: csv,
   TUYA_MOISTURE_CODE: z.string().default('humidity'),
 
+  /** Sensor → zone mapping and watering rules (see conductor.example.json). */
+  CONDUCTOR_CONFIG: z.string().min(1).default('conductor.json'),
+  /** Where recent supplemental runs are remembered, so cooldowns survive restarts. */
+  CONDUCTOR_STATE: z.string().min(1).default('.conductor-state.json'),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

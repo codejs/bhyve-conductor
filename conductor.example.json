@@ -1,0 +1,27 @@
+{
+  "pollIntervalMinutes": 15,
+  "dryRun": false,
+  "defaults": {
+    "thresholdPct": 30,
+    "runMinutes": 10,
+    "cooldownMinutes": 240,
+    "maxMinutesPerDay": 30,
+    "maxReadingAgeMinutes": 180
+  },
+  "zones": [
+    {
+      "name": "Front lawn",
+      "deviceId": "bhyve-device-id",
+      "station": 1,
+      "sensorIds": ["tuya-sensor-id-1", "tuya-sensor-id-2"]
+    },
+    {
+      "name": "Back lawn",
+      "deviceId": "bhyve-device-id",
+      "station": 2,
+      "sensorIds": ["tuya-sensor-id-3"],
+      "thresholdPct": 25,
+      "runMinutes": 15
+    }
+  ]
+}

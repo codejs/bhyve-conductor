@@ -15,6 +15,8 @@ const ALL_KEYS = [
   'TUYA_BASE_URL',
   'TUYA_SOIL_SENSOR_IDS',
   'TUYA_MOISTURE_CODE',
+  'CONDUCTOR_CONFIG',
+  'CONDUCTOR_STATE',
   'LOG_LEVEL',
 ] as const;
 
@@ -47,6 +49,13 @@ describe('loadConfig', () => {
       TUYA_MOISTURE_CODE: 'humidity',
       TUYA_SOIL_SENSOR_IDS: [],
       LOG_LEVEL: 'info',
+    });
+  });
+
+  it('defaults the conductor config and state paths', () => {
+    expect(loadConfig(['CONDUCTOR_CONFIG', 'CONDUCTOR_STATE'])).toEqual({
+      CONDUCTOR_CONFIG: 'conductor.json',
+      CONDUCTOR_STATE: '.conductor-state.json',
     });
   });
 

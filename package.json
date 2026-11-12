@@ -16,6 +16,7 @@
     "bhyve:cmd": "tsx src/scripts/bhyve-cmd.ts",
     "tuya:devices": "tsx src/scripts/tuya-devices.ts",
     "sensors:read": "tsx src/scripts/sensors-read.ts",
+    "conductor:check": "tsx src/index.ts --once --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
