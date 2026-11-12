@@ -34,11 +34,11 @@ const DEFAULT_RULES: ZoneRules = {
 
 const ZoneSchema = RulesSchema.partial().extend({
   name: z.string().min(1).optional(),
-  /** B-hyve device id (see `pnpm bhyve:devices`). */
+  /** B-hyve device id (see `npm run bhyve:devices`). */
   deviceId: z.string().min(1),
   /** Station number of the zone on that device. */
   station: z.number().int().min(1),
-  /** Tuya device ids of the soil sensors in this zone (see `pnpm tuya:devices`). */
+  /** Tuya device ids of the soil sensors in this zone (see `npm run tuya:devices`). */
   sensorIds: z.array(z.string().min(1)).min(1),
 });
 

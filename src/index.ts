@@ -1,9 +1,9 @@
 /**
  * Soil-moisture driven watering: polls the Tuya soil sensors and starts a supplemental B-hyve run
  * for any zone that's too dry.
- *   pnpm start                  run continuously
- *   pnpm dev -- --dry-run       log decisions without sending commands
- *   pnpm conductor:check        one dry-run cycle, then exit (good for checking the config)
+ *   npm start                   run continuously
+ *   npm run dev -- --dry-run    log decisions without sending commands
+ *   npm run conductor:check     one dry-run cycle, then exit (good for checking the config)
  */
 import { parseArgs } from 'node:util';
 import { BhyveClient } from './bhyve/client.ts';

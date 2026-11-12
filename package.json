@@ -28,11 +28,11 @@
   "engines": {
     "node": ">=26"
   },
-  "packageManager": "pnpm@12.18.0",
+  "packageManager": "npm@11.20.0",
   "devEngines": {
     "packageManager": {
-      "name": "pnpm",
-      "version": "12.18.0",
+      "name": "npm",
+      "version": "11.20.0",
       "onFail": "download"
     }
   },
@@ -45,5 +45,8 @@
   },
   "dependencies": {
     "zod": "^4.6.7"
+  },
+  "allowScripts": {
+    "esbuild": true
   }
 }

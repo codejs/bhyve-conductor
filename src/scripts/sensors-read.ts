@@ -1,4 +1,4 @@
-/** Reads the configured soil sensors once. Usage: pnpm sensors:read */
+/** Reads the configured soil sensors once. Usage: npm run sensors:read */
 import { loadConfig } from '../config.ts';
 import { TuyaSoilSource } from '../sensors/tuya-soil.ts';
 import { TuyaClient } from '../tuya/client.ts';
@@ -12,7 +12,7 @@ const env = loadConfig([
 ]);
 
 if (env.TUYA_SOIL_SENSOR_IDS.length === 0) {
-  console.error('Set TUYA_SOIL_SENSOR_IDS in .env (find IDs with `pnpm tuya:devices`).');
+  console.error('Set TUYA_SOIL_SENSOR_IDS in .env (find IDs with `npm run tuya:devices`).');
   process.exit(1);
 }
 
