@@ -1,0 +1,4 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"critical","text":"⏳ <b>Monitoring got stuck</b> and was restarted: poll did not finish within 10 min (something is hanging); moving on","type":"poll.failed","ts":"2026-07-01T11:25:00.000Z","sentAt":"2026-07-01T11:25:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 25.9% → 24 min","type":"sequence.started","ts":"2026-07-01T11:40:00.000Z","sentAt":"2026-07-01T11:40:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 06:40","type":"sequence.finished","ts":"2026-07-01T12:44:00.000Z","sentAt":"2026-07-01T12:44:00.000Z"}

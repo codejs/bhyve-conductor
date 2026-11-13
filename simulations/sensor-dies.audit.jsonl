@@ -1,0 +1,13 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":35.5,"detail":"average of 2 sensors (Front sensor A 35%, Front sensor B 36%) at 35.5% (threshold 30%)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":37,"detail":"Back sensor at 37% (threshold 30%)"}
+{"ts":"2026-07-01T11:20:00.000Z","type":"simulation.note","note":"Back sensor battery at 4%"}
+{"ts":"2026-07-01T11:30:00.000Z","type":"battery.low","kind":"sensor","id":"back-a","name":"Back sensor","batteryPct":4,"thresholdPct":20}
+{"ts":"2026-07-01T11:30:00.000Z","type":"simulation.note","note":"Back sensor stops reporting"}
+{"ts":"2026-07-01T14:45:00.000Z","type":"zone.no_data","zone":"timer-1:2","name":"Back lawn","detail":"no usable readings (back-a: stale (195 min old))"}
+{"ts":"2026-07-01T14:45:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"no-data","action":"skip","detail":"no usable readings (back-a: stale (195 min old))"}
+{"ts":"2026-07-01T16:00:00.000Z","type":"simulation.note","note":"Back sensor batteries replaced"}
+{"ts":"2026-07-01T16:15:00.000Z","type":"battery.ok","kind":"sensor","id":"back-a","name":"Back sensor","batteryPct":100}
+{"ts":"2026-07-01T16:15:00.000Z","type":"zone.data_restored","zone":"timer-1:2","name":"Back lawn","outageMinutes":90}
+{"ts":"2026-07-01T16:15:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":34.9,"detail":"Back sensor at 34.9% (threshold 30%)"}
+{"ts":"2026-07-01T17:00:00.000Z","type":"service.stopped","reason":"end of simulation"}

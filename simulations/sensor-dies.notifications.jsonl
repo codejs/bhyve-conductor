@@ -1,0 +1,5 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"warning","text":"🪫 <b>Low battery</b>: Back sensor (soil sensor) at 4%. Replace it soon.","type":"battery.low","ts":"2026-07-01T11:30:00.000Z","sentAt":"2026-07-01T11:30:00.000Z"}
+{"severity":"warning","text":"📵 <b>No sensor data</b> for Back lawn: not watered until readings return\nno usable readings (back-a: stale (195 min old))","type":"zone.no_data","ts":"2026-07-01T14:45:00.000Z","sentAt":"2026-07-01T14:45:00.000Z"}
+{"severity":"info","text":"🔋 Battery OK: Back sensor at 100%","type":"battery.ok","ts":"2026-07-01T16:15:00.000Z","sentAt":"2026-07-01T16:15:00.000Z"}
+{"severity":"info","text":"📶 Sensor data back for Back lawn after 1.5 h","type":"zone.data_restored","ts":"2026-07-01T16:15:00.000Z","sentAt":"2026-07-01T16:15:00.000Z"}

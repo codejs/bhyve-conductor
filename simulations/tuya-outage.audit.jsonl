@@ -1,0 +1,24 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"connection.lost","service":"tuya","error":"no sensor could be read (front-a: Tuya GET /v1.0/token failed: code 500 internal error)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.no_data","zone":"timer-1:1","name":"Front lawn","detail":"no usable readings (front-a: no reading; front-b: no reading)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.no_data","zone":"timer-1:2","name":"Back lawn","detail":"no usable readings (back-a: no reading)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"no-data","action":"skip","detail":"no usable readings (front-a: no reading; front-b: no reading)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"no-data","action":"skip","detail":"no usable readings (back-a: no reading)"}
+{"ts":"2026-07-01T14:00:00.000Z","type":"simulation.note","note":"Tuya is back"}
+{"ts":"2026-07-01T14:15:00.000Z","type":"connection.restored","service":"tuya","downSince":"2026-07-01T11:00:00.000Z","outageMinutes":195,"failures":13,"lastError":"no sensor could be read (front-a: Tuya GET /v1.0/token failed: code 500 internal error)"}
+{"ts":"2026-07-01T14:15:00.000Z","type":"zone.data_restored","zone":"timer-1:1","name":"Front lawn","outageMinutes":195}
+{"ts":"2026-07-01T14:15:00.000Z","type":"zone.data_restored","zone":"timer-1:2","name":"Back lawn","outageMinutes":195}
+{"ts":"2026-07-01T14:15:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"dry","action":"water","moisturePct":25.7,"minutes":24,"detail":"average of 2 sensors (Front sensor A 24.7%, Front sensor B 26.7%) at 25.7% is below 30%; watering 24 min"}
+{"ts":"2026-07-01T14:15:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":35.7,"detail":"Back sensor at 35.7% (threshold 30%)"}
+{"ts":"2026-07-01T14:15:00.000Z","type":"sequence.started","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"waves":[[{"station":1,"runTime":8}],[{"station":1,"runTime":8}],[{"station":1,"runTime":8}]],"soakMinutes":20,"plannedMinutes":24,"zones":[{"zone":"timer-1:1","name":"Front lawn","moisturePct":25.7,"minutes":24,"why":"average of 2 sensors (Front sensor A 24.7%, Front sensor B 26.7%) at 25.7% is below 30%; watering 24 min"}]}
+{"ts":"2026-07-01T14:15:00.000Z","type":"wave.sent","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycle":1,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T14:15:00.000Z","type":"wave.confirmed","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycle":1,"of":3,"via":"event"}
+{"ts":"2026-07-01T14:30:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"cooldown","action":"skip","moisturePct":29,"detail":"average of 2 sensors (Front sensor A 28%, Front sensor B 30%) at 29% but last watered 2026-07-01T14:15:00.000Z; cooling down until 2026-07-01T18:15:00.000Z"}
+{"ts":"2026-07-01T14:43:00.000Z","type":"wave.sent","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycle":2,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T14:43:00.000Z","type":"wave.confirmed","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycle":2,"of":3,"via":"event"}
+{"ts":"2026-07-01T15:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":32.1,"detail":"average of 2 sensors (Front sensor A 31.1%, Front sensor B 33.1%) at 32.1% (threshold 30%)"}
+{"ts":"2026-07-01T15:11:00.000Z","type":"wave.sent","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycle":3,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T15:11:00.000Z","type":"wave.confirmed","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycle":3,"of":3,"via":"event"}
+{"ts":"2026-07-01T15:11:00.000Z","type":"sequence.completed","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycles":3,"deliveredMinutes":24}
+{"ts":"2026-07-01T15:19:00.000Z","type":"sequence.finished","sequence":"9370c66f","device":"timer-1","zoneNames":["Front lawn"],"cycles":3,"deliveredMinutes":24,"startedAt":"2026-07-01T14:15:00.000Z"}
+{"ts":"2026-07-01T16:00:00.000Z","type":"service.stopped","reason":"end of simulation"}

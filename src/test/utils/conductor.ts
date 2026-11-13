@@ -20,6 +20,16 @@ export const zone = (overrides: Partial<ZoneConfig> = {}): ZoneConfig => {
     cooldownMinutes: 240,
     maxMinutesPerDay: 30,
     maxReadingAgeMinutes: 180,
+    sensorAggregation: 'driest',
+    maxCycleMinutes: 240,
+    soakMinutes: 30,
+    targetPct: 40,
+    criticalLowPct: 20,
+    criticalHighPct: 60,
+    rootDepthIn: 6,
+    cropCoefficient: 0.8,
+    rainEfficiency: 0.8,
+    maxWaitHours: 6,
     ...overrides,
   };
 };

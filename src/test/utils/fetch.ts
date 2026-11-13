@@ -28,3 +28,9 @@ export const fetchCall = (fn: FetchMock, n: number) => {
 
 /** Let pending promise callbacks run (works with fake timers too, since setImmediate stays real). */
 export const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** A response that never comes (half-open connection); it only ends when the request's signal aborts. */
+export const hangingFetch = (_input: unknown, init?: RequestInit): Promise<Response> =>
+  new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason as Error));
+  });

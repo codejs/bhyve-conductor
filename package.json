@@ -16,6 +16,12 @@
     "bhyve:cmd": "tsx src/scripts/bhyve-cmd.ts",
     "tuya:devices": "tsx src/scripts/tuya-devices.ts",
     "sensors:read": "tsx src/scripts/sensors-read.ts",
+    "weather:forecast": "tsx src/scripts/weather-forecast.ts",
+    "audit": "tsx src/scripts/audit.ts",
+    "audit:summary": "tsx src/scripts/audit.ts --summary",
+    "audit:recovery": "tsx src/scripts/audit.ts --recovery",
+    "notify:test": "tsx src/scripts/notify-test.ts",
+    "simulate": "tsx src/scripts/simulate.ts",
     "conductor:check": "tsx src/index.ts --once --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -28,11 +34,11 @@
   "engines": {
     "node": ">=26"
   },
-  "packageManager": "npm@11.20.0",
+  "packageManager": "npm@10.9.4",
   "devEngines": {
     "packageManager": {
       "name": "npm",
-      "version": "11.20.0",
+      "version": "10.9.4",
       "onFail": "download"
     }
   },

@@ -1,0 +1,6 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 27% → 24 min","type":"sequence.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"warning","text":"❓ <b>Couldn’t confirm</b> cycle 1/3 started: Front lawn\nCounted as delivered (never re-sent). Check the lawn if unsure.","type":"wave.unconfirmed","ts":"2026-07-01T11:00:20.000Z","sentAt":"2026-07-01T11:00:20.000Z"}
+{"severity":"critical","text":"🔴 <b>B-hyve cloud unreachable</b> since Jul 1, 06:00\nWatering can’t be planned or checked.\nError: B-hyve GET /devices/timer-1 failed: HTTP 503 Service Unavailable","type":"connection.lost","ts":"2026-07-01T11:00:20.000Z","sentAt":"2026-07-01T11:05:20.000Z"}
+{"severity":"info","text":"🟢 <b>B-hyve cloud reachable again</b> after 28 min (1 failed attempts)","type":"connection.restored","ts":"2026-07-01T11:28:00.000Z","sentAt":"2026-07-01T11:28:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 06:00","type":"sequence.finished","ts":"2026-07-01T12:04:00.000Z","sentAt":"2026-07-01T12:04:00.000Z"}

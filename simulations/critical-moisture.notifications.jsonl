@@ -1,0 +1,8 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"critical","text":"🏜️ <b>Critically dry</b>: Back lawn\nBack sensor reads 19.8% (alert below 20%)","type":"moisture.critical_low","ts":"2026-07-01T13:15:00.000Z","sentAt":"2026-07-01T13:15:00.000Z"}
+{"severity":"critical","text":"🌊 <b>Waterlogged</b>: Front lawn\nFront sensor A reads 73.8% (alert above 60%)\nPossible leak, stuck valve, overwatering or heavy rain.","type":"moisture.critical_high","ts":"2026-07-01T17:15:00.000Z","sentAt":"2026-07-01T17:15:00.000Z"}
+{"severity":"critical","text":"🌊 <b>Waterlogged</b>: Front lawn\nFront sensor B reads 74.8% (alert above 60%)\nPossible leak, stuck valve, overwatering or heavy rain.","type":"moisture.critical_high","ts":"2026-07-01T17:15:00.000Z","sentAt":"2026-07-01T17:15:00.000Z"}
+{"severity":"critical","text":"🌊 <b>Waterlogged</b>: Back lawn\nBack sensor reads 60.8% (alert above 60%)\nPossible leak, stuck valve, overwatering or heavy rain.","type":"moisture.critical_high","ts":"2026-07-01T17:15:00.000Z","sentAt":"2026-07-01T17:15:00.000Z"}
+{"severity":"info","text":"👍 Moisture back to normal: Back lawn, Back sensor at 58%","type":"moisture.normal","ts":"2026-07-01T20:00:00.000Z","sentAt":"2026-07-01T20:00:00.000Z"}
+{"severity":"info","text":"👍 Moisture back to normal: Front lawn, Front sensor A at 55.8%","type":"moisture.normal","ts":"2026-07-01T20:15:00.000Z","sentAt":"2026-07-01T20:15:00.000Z"}
+{"severity":"info","text":"👍 Moisture back to normal: Front lawn, Front sensor B at 56.8%","type":"moisture.normal","ts":"2026-07-01T20:15:00.000Z","sentAt":"2026-07-01T20:15:00.000Z"}

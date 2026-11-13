@@ -1,0 +1,6 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"forecast-covered","action":"none","moisturePct":29,"detail":"average of 2 sensors (Front sensor A 28.5%, Front sensor B 29.5%) at 29%: soil 1.74in (29%), threshold 1.8in, target 2.4in; next 72h: crop use −0.57in, rain +0.23in, scheduled +0in → no water now: rain/scheduled watering restores the threshold within 2h"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":37,"detail":"Back sensor at 37% (threshold 30%)"}
+{"ts":"2026-07-01T13:00:00.000Z","type":"simulation.note","note":"It rains (8 mm)"}
+{"ts":"2026-07-01T13:15:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":34.1,"detail":"average of 2 sensors (Front sensor A 33.6%, Front sensor B 34.6%) at 34.1% (threshold 30%)"}
+{"ts":"2026-07-01T15:00:00.000Z","type":"service.stopped","reason":"end of simulation"}

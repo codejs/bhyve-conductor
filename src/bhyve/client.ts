@@ -5,13 +5,35 @@ const API_BASE = 'https://api.orbitbhyve.com/v1';
 const WS_URL = 'wss://api.orbitbhyve.com/v1/events';
 const PING_INTERVAL_MS = 25_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 
 export interface BhyveCredentials {
   email: string;
   password: string;
 }
 
+export interface BhyveClientOptions {
+  /** Abort REST requests that take longer than this (a half-open connection would otherwise hang forever). */
+  requestTimeoutMs?: number;
+  /** Give up on a WebSocket that hasn't opened within this time. */
+  connectTimeoutMs?: number;
+}
+
 type EventListener = (event: BhyveEvent) => void;
+export type ConnectionListener = (state: 'connected' | 'disconnected', detail: { code?: number }) => void;
+
+/** Runs `fetch` with a timeout, turning aborts and network failures into descriptive errors. */
+const timedFetch = async (what: string, url: string, init: RequestInit, timeoutMs: number): Promise<Response> => {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error(`${what} timed out after ${timeoutMs / 1000}s`, { cause: err });
+    }
+    throw new Error(`${what} failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+};
 
 /**
  * Client for the unofficial Orbit B-hyve cloud API.
@@ -29,19 +51,29 @@ export class BhyveClient {
   #closing = false;
   #wsReady: Promise<void> | undefined;
   readonly #listeners = new Set<EventListener>();
+  readonly #connectionListeners = new Set<ConnectionListener>();
+  readonly #requestTimeoutMs: number;
+  readonly #connectTimeoutMs: number;
 
-  constructor(creds: BhyveCredentials) {
+  constructor(creds: BhyveCredentials, opts: BhyveClientOptions = {}) {
     this.#creds = creds;
+    this.#requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#connectTimeoutMs = opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   }
 
   // ---------- REST ----------
 
   async login(): Promise<BhyveSession> {
-    const res = await fetch(`${API_BASE}/session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ session: { email: this.#creds.email, password: this.#creds.password } }),
-    });
+    const res = await timedFetch(
+      'B-hyve login',
+      `${API_BASE}/session`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ session: { email: this.#creds.email, password: this.#creds.password } }),
+      },
+      this.#requestTimeoutMs,
+    );
     if (!res.ok) {
       throw new Error(`B-hyve login failed: HTTP ${res.status} ${await res.text()}`);
     }
@@ -57,9 +89,12 @@ export class BhyveClient {
   }
 
   async #get<T>(path: string, retry = true): Promise<T> {
-    const res = await fetch(`${API_BASE}${path}`, {
-      headers: { Accept: 'application/json', 'orbit-session-token': await this.#token() },
-    });
+    const res = await timedFetch(
+      `B-hyve GET ${path}`,
+      `${API_BASE}${path}`,
+      { headers: { Accept: 'application/json', 'orbit-session-token': await this.#token() } },
+      this.#requestTimeoutMs,
+    );
     if (res.status === 401 && retry) {
       this.#session = undefined; // token expired: log in again once
       return this.#get<T>(path, false);
@@ -89,6 +124,22 @@ export class BhyveClient {
     return () => this.#listeners.delete(listener);
   }
 
+  /** Subscribe to socket connects/disconnects (for the audit trail). Returns an unsubscribe function. */
+  onConnection(listener: ConnectionListener): () => void {
+    this.#connectionListeners.add(listener);
+    return () => this.#connectionListeners.delete(listener);
+  }
+
+  #emitConnection(state: 'connected' | 'disconnected', detail: { code?: number }): void {
+    for (const listener of this.#connectionListeners) {
+      try {
+        listener(state, detail);
+      } catch (err) {
+        log.error('B-hyve connection listener threw', err);
+      }
+    }
+  }
+
   /** Opens the events socket (idempotent). Reconnects automatically until `close()` is called. */
   connect(): Promise<void> {
     this.#closing = false;
@@ -103,13 +154,22 @@ export class BhyveClient {
       const ws = new WebSocket(WS_URL);
       this.#ws = ws;
       let opened = false;
+      // A socket stuck in CONNECTING would leave every command waiting forever.
+      const connectTimer = setTimeout(() => {
+        if (opened) return;
+        log.warn(`B-hyve socket did not open within ${this.#connectTimeoutMs / 1000}s`);
+        reject(new Error(`B-hyve socket did not open within ${this.#connectTimeoutMs / 1000}s`));
+        ws.close();
+      }, this.#connectTimeoutMs);
 
       ws.addEventListener('open', () => {
+        clearTimeout(connectTimer);
         opened = true;
         this.#reconnectAttempts = 0;
         ws.send(JSON.stringify({ event: 'app_connection', orbit_session_token: token }));
         this.#pingTimer = setInterval(() => this.#send({ event: 'ping' }), PING_INTERVAL_MS);
         log.info('B-hyve event socket connected');
+        this.#emitConnection('connected', {});
         resolve();
       });
 
@@ -131,11 +191,18 @@ export class BhyveClient {
       });
 
       ws.addEventListener('close', (ev) => {
+        clearTimeout(connectTimer);
         clearInterval(this.#pingTimer);
-        this.#ws = undefined;
-        this.#wsReady = undefined;
+        // Only clear state that belongs to this socket (a newer one may already have replaced it).
+        if (this.#ws === ws) {
+          this.#ws = undefined;
+          this.#wsReady = undefined;
+        }
         if (!opened) {
           reject(new Error(`B-hyve socket closed before opening (code ${ev.code})`));
+        } else if (!this.#closing) {
+          // Our own close() is not a disconnect worth reporting.
+          this.#emitConnection('disconnected', { code: ev.code });
         }
         if (!this.#closing) this.#scheduleReconnect(ev.code);
       });
@@ -154,7 +221,8 @@ export class BhyveClient {
     this.#reconnectTimer = setTimeout(() => {
       // Fresh login on reconnect in case the token was the problem.
       this.#session = undefined;
-      this.connect().catch((err: unknown) => log.error('B-hyve reconnect failed', err));
+      // Expected while B-hyve is unreachable; the next attempt is already scheduled, so no stack trace.
+      this.connect().catch((err: unknown) => log.warn(`B-hyve reconnect failed: ${err instanceof Error ? err.message : String(err)}`));
     }, delay);
   }
 

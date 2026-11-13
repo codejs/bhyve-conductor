@@ -1,7 +1,3 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
-import { z } from 'zod';
-import { log } from '../log.ts';
-
 /** One supplemental run the conductor started. */
 export interface WateringRun {
   zoneKey: string;
@@ -53,45 +49,5 @@ export class WateringHistory implements WateringHistoryView {
   prune(now: Date, keepMs: number): void {
     const cutoff = now.getTime() - Math.max(keepMs, DAY_MS);
     this.#runs = this.#runs.filter((r) => r.at.getTime() >= cutoff);
-  }
-}
-
-const FileSchema = z.object({
-  runs: z.array(z.object({ zoneKey: z.string(), at: z.iso.datetime(), minutes: z.number().nonnegative() })),
-});
-
-/** Persists the history as JSON; writes go to a temp file first so a crash can't leave half a file. */
-export class FileHistoryStore {
-  readonly #path: string;
-
-  constructor(path: string) {
-    this.#path = path;
-  }
-
-  async load(): Promise<WateringHistory> {
-    let text: string;
-    try {
-      text = await readFile(this.#path, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return new WateringHistory();
-      throw err;
-    }
-    let parsed;
-    try {
-      parsed = FileSchema.parse(JSON.parse(text));
-    } catch (err) {
-      log.warn(`Watering history ${this.#path} is unreadable; starting with an empty history`, err);
-      return new WateringHistory();
-    }
-    return new WateringHistory(parsed.runs.map((r) => ({ zoneKey: r.zoneKey, at: new Date(r.at), minutes: r.minutes })));
-  }
-
-  async save(history: WateringHistory): Promise<void> {
-    const body = {
-      runs: history.runs.map((r) => ({ zoneKey: r.zoneKey, at: r.at.toISOString(), minutes: r.minutes })),
-    };
-    const tmp = `${this.#path}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
-    await rename(tmp, this.#path);
   }
 }

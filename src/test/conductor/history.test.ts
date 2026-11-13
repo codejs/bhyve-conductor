@@ -1,9 +1,5 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FileHistoryStore, WateringHistory } from '../../conductor/history.ts';
-import { log } from '../../log.ts';
+import { describe, expect, it } from 'vitest';
+import { WateringHistory } from '../../conductor/history.ts';
 import { minutesAgo, NOW } from '../utils/conductor.ts';
 
 const DAY_MIN = 24 * 60;
@@ -56,66 +52,5 @@ describe('WateringHistory', () => {
     ]);
     h2.prune(NOW, 2 * DAY_MIN * 60_000); // a long cooldown keeps runs it still depends on
     expect(h2.runs.map((r) => r.minutes)).toEqual([2]);
-  });
-});
-
-describe('FileHistoryStore', () => {
-  let dir: string;
-  let path: string;
-
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'conductor-history-'));
-    path = join(dir, 'state.json');
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-
-  it('starts empty when there is no file yet', async () => {
-    const h = await new FileHistoryStore(path).load();
-
-    expect(h.runs).toEqual([]);
-  });
-
-  it('round-trips runs through the file', async () => {
-    const store = new FileHistoryStore(path);
-    const h = new WateringHistory([
-      { zoneKey: 'dev1:1', at: minutesAgo(30), minutes: 10 },
-      { zoneKey: 'dev1:2', at: minutesAgo(5), minutes: 2.5 },
-    ]);
-
-    await store.save(h);
-    const loaded = await store.load();
-
-    expect(loaded.runs).toEqual(h.runs);
-    expect(loaded.lastRun('dev1:1')?.at).toEqual(minutesAgo(30));
-  });
-
-  it('writes readable JSON and leaves no temp file behind', async () => {
-    await new FileHistoryStore(path).save(new WateringHistory([{ zoneKey: 'dev1:1', at: NOW, minutes: 10 }]));
-
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({
-      runs: [{ zoneKey: 'dev1:1', at: '2026-07-01T12:00:00.000Z', minutes: 10 }],
-    });
-    expect(await readdir(dir)).toEqual(['state.json']);
-  });
-
-  it.each([
-    ['invalid JSON', '{ runs: '],
-    ['the wrong shape', JSON.stringify({ runs: [{ zoneKey: 'a', at: 'yesterday', minutes: 5 }] })],
-  ])('warns and starts empty on %s', async (_, content) => {
-    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
-    await writeFile(path, content);
-
-    const h = await new FileHistoryStore(path).load();
-
-    expect(h.runs).toEqual([]);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unreadable'), expect.anything());
-  });
-
-  it('propagates errors other than a missing file', async () => {
-    // Reading a directory fails with EISDIR.
-    await expect(new FileHistoryStore(dir).load()).rejects.toThrow();
   });
 });
