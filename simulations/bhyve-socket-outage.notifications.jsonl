@@ -1,0 +1,5 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 27% → 24 min","type":"sequence.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"critical","text":"🔴 <b>B-hyve command connection unreachable</b> since Jul 1, 06:28\nWatering commands can’t be sent; pending cycles are being retried.\nError: B-hyve socket did not open within 15s","type":"connection.lost","ts":"2026-07-01T11:28:00.000Z","sentAt":"2026-07-01T11:33:00.000Z"}
+{"severity":"info","text":"🟢 <b>B-hyve command connection reachable again</b> after 18 min (4 failed attempts)","type":"connection.restored","ts":"2026-07-01T11:46:00.000Z","sentAt":"2026-07-01T11:46:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 06:00","type":"sequence.finished","ts":"2026-07-01T12:22:00.000Z","sentAt":"2026-07-01T12:22:00.000Z"}

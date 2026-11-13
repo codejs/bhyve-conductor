@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeWebSocket } from '../utils/fake-websocket.ts';
-import { fetchCall, flush, jsonResponse, mockFetch, type FetchMock } from '../utils/fetch.ts';
+import { fetchCall, flush, hangingFetch, jsonResponse, mockFetch, type FetchMock } from '../utils/fetch.ts';
 import { BhyveClient } from '../../bhyve/client.ts';
 
 const API = 'https://api.orbitbhyve.com/v1';
@@ -95,6 +95,26 @@ describe('BhyveClient', () => {
       await expect(client.getPrograms()).rejects.toThrow('HTTP 401 nope');
     });
 
+    it('times out a request that never gets an answer (half-open connection)', async () => {
+      const quick = new BhyveClient(CREDS, { requestTimeoutMs: 50 });
+      fetchMock.mockResolvedValueOnce(session()).mockImplementationOnce(hangingFetch);
+
+      await expect(quick.getDevices()).rejects.toThrow('B-hyve GET /devices?user_id=user-1 timed out after 0.05s');
+    });
+
+    it('times out a login that never answers', async () => {
+      const quick = new BhyveClient(CREDS, { requestTimeoutMs: 50 });
+      fetchMock.mockImplementationOnce(hangingFetch);
+
+      await expect(quick.login()).rejects.toThrow('B-hyve login timed out after 0.05s');
+    });
+
+    it('describes network failures', async () => {
+      fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+
+      await expect(client.login()).rejects.toThrow('B-hyve login failed: fetch failed');
+    });
+
     it('reports other HTTP errors', async () => {
       fetchMock.mockResolvedValueOnce(session()).mockResolvedValueOnce(new Response('boom', { status: 500 }));
 
@@ -140,6 +160,76 @@ describe('BhyveClient', () => {
       FakeWebSocket.latest().serverClose(1006);
 
       await expect(connected).rejects.toThrow('closed before opening (code 1006)');
+    });
+
+    it('gives up on a socket that never opens, so commands fail instead of hanging', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+      const quick = new BhyveClient(CREDS, { connectTimeoutMs: 15_000 });
+      fetchMock.mockResolvedValue(session());
+
+      const sending = quick.startWatering('d1', [{ station: 1, runTime: 5 }]);
+      const outcome = sending.then(
+        () => 'sent',
+        (err: Error) => err.message,
+      );
+      await flush();
+      vi.advanceTimersByTime(15_000);
+      await flush();
+
+      await expect(outcome).resolves.toBe('B-hyve socket did not open within 15s');
+      expect(FakeWebSocket.instances[0]?.readyState).toBe(FakeWebSocket.CLOSED);
+      quick.close();
+    });
+
+    it('reports connects and disconnects to connection listeners', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+      const states: string[] = [];
+      client.onConnection((state, { code }) => states.push(code === undefined ? state : `${state} ${code}`));
+
+      const ws = await connect();
+      ws.serverClose(1006);
+
+      expect(states).toEqual(['connected', 'disconnected 1006']);
+    });
+
+    it('does not report its own close() as a disconnect', async () => {
+      const states: string[] = [];
+      client.onConnection((state) => states.push(state));
+      await connect();
+
+      client.close();
+
+      expect(states).toEqual(['connected']);
+    });
+
+    it('does not report a socket that never opened as a disconnect', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+      const states: string[] = [];
+      client.onConnection((state) => states.push(state));
+      fetchMock.mockResolvedValueOnce(session());
+
+      const connecting = client.connect().catch(() => 'failed');
+      await flush();
+      FakeWebSocket.latest().serverClose(1006);
+
+      await expect(connecting).resolves.toBe('failed');
+      expect(states).toEqual([]);
+    });
+
+    it('a late close from an old socket does not clobber the new one', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+      const first = await connect('tok-1');
+      // A real socket's close event arrives asynchronously; by then a new socket may already be in use.
+      first.close = () => {
+        first.readyState = FakeWebSocket.CLOSING;
+      };
+      client.close();
+      const second = await connect('tok-2');
+
+      first.serverClose(1006); // the old socket's close event finally arrives
+      await client.startWatering('d1', [{ station: 1, runTime: 5 }]);
+
+      expect(second.sentJson.at(-1)).toMatchObject({ event: 'change_mode', device_id: 'd1' });
     });
 
     it('delivers events to listeners until they unsubscribe', async () => {

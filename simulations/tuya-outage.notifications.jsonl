@@ -1,0 +1,5 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"critical","text":"🔴 <b>Tuya (soil sensors) unreachable</b> since Jul 1, 06:00\nNo sensor data, so no supplemental watering until it is back.\nError: no sensor could be read (front-a: Tuya GET /v1.0/token failed: code 500 internal error)","type":"connection.lost","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:05:00.000Z"}
+{"severity":"info","text":"🟢 <b>Tuya (soil sensors) reachable again</b> after 3.3 h (13 failed attempts)","type":"connection.restored","ts":"2026-07-01T14:15:00.000Z","sentAt":"2026-07-01T14:15:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 25.7% → 24 min","type":"sequence.started","ts":"2026-07-01T14:15:00.000Z","sentAt":"2026-07-01T14:15:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 09:15","type":"sequence.finished","ts":"2026-07-01T15:19:00.000Z","sentAt":"2026-07-01T15:19:00.000Z"}

@@ -15,6 +15,11 @@ const ALL_KEYS = [
   'TUYA_BASE_URL',
   'TUYA_SOIL_SENSOR_IDS',
   'TUYA_MOISTURE_CODE',
+  'CONDUCTOR_CONFIG',
+  'CONDUCTOR_STATE',
+  'LOCATION',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_CHAT_ID',
   'LOG_LEVEL',
 ] as const;
 
@@ -48,6 +53,48 @@ describe('loadConfig', () => {
       TUYA_SOIL_SENSOR_IDS: [],
       LOG_LEVEL: 'info',
     });
+  });
+
+  it('defaults the conductor config and state paths', () => {
+    expect(loadConfig(['CONDUCTOR_CONFIG', 'CONDUCTOR_STATE'])).toEqual({
+      CONDUCTOR_CONFIG: 'conductor.json',
+      CONDUCTOR_STATE: '.conductor-state.json',
+    });
+  });
+
+  it('treats LOCATION as optional and trims it', () => {
+    expect(loadConfig(['LOCATION'])).toEqual({});
+
+    vi.stubEnv('LOCATION', '  Austin, TX ');
+    expect(loadConfig(['LOCATION'])).toEqual({ LOCATION: 'Austin, TX' });
+  });
+
+  it('treats a blank LOCATION (as copied from .env.example) as not set', () => {
+    vi.stubEnv('LOCATION', '   ');
+
+    expect(loadConfig(['LOCATION'])).toEqual({});
+  });
+
+  it('accepts Telegram settings, and treats blanks as not set', () => {
+    vi.stubEnv('TELEGRAM_BOT_TOKEN', '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw');
+    vi.stubEnv('TELEGRAM_CHAT_ID', '-1001234567890');
+    expect(loadConfig(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'])).toEqual({
+      TELEGRAM_BOT_TOKEN: '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw',
+      TELEGRAM_CHAT_ID: '-1001234567890',
+    });
+
+    vi.stubEnv('TELEGRAM_BOT_TOKEN', '');
+    vi.stubEnv('TELEGRAM_CHAT_ID', '@lawn_alerts');
+    expect(loadConfig(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'])).toEqual({ TELEGRAM_CHAT_ID: '@lawn_alerts' });
+  });
+
+  it.each([
+    ['TELEGRAM_BOT_TOKEN', 'not-a-token'],
+    ['TELEGRAM_CHAT_ID', 'my chat'],
+  ] as const)('rejects a malformed %s', (key, value) => {
+    vi.stubEnv(key, value);
+
+    expect(() => loadConfig([key])).toThrow(key);
   });
 
   it('splits sensor IDs on commas and trims blanks', () => {

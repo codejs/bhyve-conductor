@@ -1,0 +1,5 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"warning","text":"🪫 <b>Low battery</b>: Hose timer (B-hyve timer) at 15%. Replace it soon.","type":"battery.low","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"warning","text":"🪫 <b>Low battery</b>: Front sensor A (soil sensor) at 18%. Replace it soon.","type":"battery.low","ts":"2026-07-01T11:45:00.000Z","sentAt":"2026-07-01T11:45:00.000Z"}
+{"severity":"info","text":"🔋 Battery OK: Front sensor A at 100%","type":"battery.ok","ts":"2026-07-01T12:45:00.000Z","sentAt":"2026-07-01T12:45:00.000Z"}
+{"severity":"info","text":"🔋 Battery OK: Hose timer at 100%","type":"battery.ok","ts":"2026-07-01T14:00:00.000Z","sentAt":"2026-07-01T14:00:00.000Z"}

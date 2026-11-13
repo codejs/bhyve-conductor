@@ -1,0 +1,19 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"device.offline","device":"timer-1","name":"Lawn timer"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"device-offline","action":"skip","moisturePct":27,"detail":"average of 2 sensors (Front sensor A 26%, Front sensor B 28%) at 27% is below 30%; watering 24 min, but Lawn timer is not connected"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":37,"detail":"Back sensor at 37% (threshold 30%)"}
+{"ts":"2026-07-01T13:00:00.000Z","type":"simulation.note","note":"The controller is back on Wi-Fi"}
+{"ts":"2026-07-01T13:15:00.000Z","type":"device.online","device":"timer-1","name":"Lawn timer","offlineMinutes":135}
+{"ts":"2026-07-01T13:15:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"dry","action":"water","moisturePct":26.1,"minutes":24,"detail":"average of 2 sensors (Front sensor A 25.1%, Front sensor B 27.1%) at 26.1% is below 30%; watering 24 min"}
+{"ts":"2026-07-01T13:15:00.000Z","type":"sequence.started","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"waves":[[{"station":1,"runTime":8}],[{"station":1,"runTime":8}],[{"station":1,"runTime":8}]],"soakMinutes":20,"plannedMinutes":24,"zones":[{"zone":"timer-1:1","name":"Front lawn","moisturePct":26.1,"minutes":24,"why":"average of 2 sensors (Front sensor A 25.1%, Front sensor B 27.1%) at 26.1% is below 30%; watering 24 min"}]}
+{"ts":"2026-07-01T13:15:00.000Z","type":"wave.sent","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycle":1,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T13:15:00.000Z","type":"wave.confirmed","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycle":1,"of":3,"via":"event"}
+{"ts":"2026-07-01T13:30:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"cooldown","action":"skip","moisturePct":29.4,"detail":"average of 2 sensors (Front sensor A 28.4%, Front sensor B 30.4%) at 29.4% but last watered 2026-07-01T13:15:00.000Z; cooling down until 2026-07-01T17:15:00.000Z"}
+{"ts":"2026-07-01T13:43:00.000Z","type":"wave.sent","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycle":2,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T13:43:00.000Z","type":"wave.confirmed","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycle":2,"of":3,"via":"event"}
+{"ts":"2026-07-01T13:45:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":30.1,"detail":"average of 2 sensors (Front sensor A 29.1%, Front sensor B 31.1%) at 30.1% (threshold 30%)"}
+{"ts":"2026-07-01T14:11:00.000Z","type":"wave.sent","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycle":3,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T14:11:00.000Z","type":"wave.confirmed","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycle":3,"of":3,"via":"event"}
+{"ts":"2026-07-01T14:11:00.000Z","type":"sequence.completed","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycles":3,"deliveredMinutes":24}
+{"ts":"2026-07-01T14:19:00.000Z","type":"sequence.finished","sequence":"6bcf9c5d","device":"timer-1","zoneNames":["Front lawn"],"cycles":3,"deliveredMinutes":24,"startedAt":"2026-07-01T13:15:00.000Z"}
+{"ts":"2026-07-01T15:00:00.000Z","type":"service.stopped","reason":"end of simulation"}

@@ -13,6 +13,8 @@ export interface TuyaCredentials {
   clientId: string;
   clientSecret: string;
   baseUrl: string;
+  /** Abort requests that take longer than this (default 20s); a half-open connection would otherwise hang forever. */
+  requestTimeoutMs?: number;
 }
 
 export interface TuyaDataPoint {
@@ -58,10 +60,12 @@ const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex
 
 export class TuyaClient {
   readonly #creds: TuyaCredentials;
+  readonly #timeoutMs: number;
   #token: { value: string; expiresAt: number } | undefined;
 
   constructor(creds: TuyaCredentials) {
     this.#creds = { ...creds, baseUrl: creds.baseUrl.replace(/\/+$/, '') };
+    this.#timeoutMs = creds.requestTimeoutMs ?? 20_000;
   }
 
   #sign(method: string, path: string, body: string, accessToken: string, t: string, nonce: string): string {
@@ -96,7 +100,18 @@ export class TuyaClient {
     if (auth) headers.access_token = accessToken;
     if (bodyStr) headers['Content-Type'] = 'application/json';
 
-    const res = await fetch(this.#creds.baseUrl + path, { method, headers, ...(bodyStr ? { body: bodyStr } : {}) });
+    let res: Response;
+    try {
+      res = await fetch(this.#creds.baseUrl + path, {
+        method,
+        headers,
+        signal: AbortSignal.timeout(this.#timeoutMs),
+        ...(bodyStr ? { body: bodyStr } : {}),
+      });
+    } catch (err) {
+      const why = err instanceof DOMException && err.name === 'TimeoutError' ? `timed out after ${this.#timeoutMs / 1000}s` : String(err);
+      throw new Error(`Tuya ${method} ${path.split('?')[0]} ${why}`, { cause: err });
+    }
     const json = (await res.json()) as TuyaResponse<T>;
     if (!json.success) {
       // 1010 = token invalid/expired: drop it so the next call fetches a new one.

@@ -1,0 +1,5 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"critical","text":"📴 <b>Lawn timer is offline</b>: B-hyve can’t reach it, so no watering is possible.","type":"device.offline","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"info","text":"📶 Lawn timer is back online after 2.3 h","type":"device.online","ts":"2026-07-01T13:15:00.000Z","sentAt":"2026-07-01T13:15:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 26.1% → 24 min","type":"sequence.started","ts":"2026-07-01T13:15:00.000Z","sentAt":"2026-07-01T13:15:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 08:15","type":"sequence.finished","ts":"2026-07-01T14:19:00.000Z","sentAt":"2026-07-01T14:19:00.000Z"}

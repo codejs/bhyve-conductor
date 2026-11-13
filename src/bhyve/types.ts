@@ -45,8 +45,23 @@ export interface BhyveProgram {
   id: string;
   device_id: string;
   name?: string;
+  /** Program letter: "a", "b", "c"; "e" is the Smart Watering program. */
   program?: string;
   enabled?: boolean;
+  /**
+   * Which days the program runs:
+   *  - `days`: `days` lists weekdays, 0 = Sunday … 6 = Saturday
+   *  - `interval`: every `interval` days counting from `interval_start_time`
+   *  - `odd` / `even`: odd or even days of the month
+   */
+  frequency?: { type?: string; days?: number[]; interval?: number; interval_start_time?: string; [key: string]: unknown };
+  /** Local wall-clock start times, "HH:MM". */
+  start_times?: string[];
+  /** Zones run one after another in this order. `run_time` is in minutes. */
+  run_times?: { station: number; run_time: number }[];
+  /** Seasonal adjustment in percent (100 = run times as listed). */
+  budget?: number;
+  is_smart_program?: boolean;
   [key: string]: unknown;
 }
 

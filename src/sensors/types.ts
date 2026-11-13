@@ -14,4 +14,6 @@ export interface MoistureReading {
 export interface MoistureSource {
   readonly id: string;
   read(): Promise<MoistureReading[]>;
+  /** Why sensors failed in the last read (a source returns what it could rather than throwing). */
+  readonly lastErrors?: readonly { sensorId: string; error: string }[];
 }

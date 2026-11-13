@@ -1,0 +1,16 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":35.5,"detail":"average of 2 sensors (Front sensor A 35%, Front sensor B 36%) at 35.5% (threshold 30%)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"rain-delay","action":"skip","moisturePct":22,"detail":"Back sensor at 22% is below 30%; watering 24 min, but Lawn timer has a 48h rain delay"}
+{"ts":"2026-07-01T13:15:00.000Z","type":"moisture.critical_low","zone":"timer-1:2","name":"Back lawn","sensor":"back-a","sensorName":"Back sensor","moisturePct":19.8,"limitPct":20}
+{"ts":"2026-07-01T16:45:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"rain-delay","action":"skip","moisturePct":29.8,"detail":"average of 2 sensors (Front sensor A 29.3%, Front sensor B 30.3%) at 29.8% is below 30%; watering 24 min, but Lawn timer has a 48h rain delay"}
+{"ts":"2026-07-01T17:00:00.000Z","type":"simulation.note","note":"Thunderstorm: 60 mm of rain"}
+{"ts":"2026-07-01T17:15:00.000Z","type":"moisture.critical_high","zone":"timer-1:1","name":"Front lawn","sensor":"front-a","sensorName":"Front sensor A","moisturePct":73.8,"limitPct":60}
+{"ts":"2026-07-01T17:15:00.000Z","type":"moisture.critical_high","zone":"timer-1:1","name":"Front lawn","sensor":"front-b","sensorName":"Front sensor B","moisturePct":74.8,"limitPct":60}
+{"ts":"2026-07-01T17:15:00.000Z","type":"moisture.critical_high","zone":"timer-1:2","name":"Back lawn","sensor":"back-a","sensorName":"Back sensor","moisturePct":60.8,"limitPct":60}
+{"ts":"2026-07-01T17:15:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":74.3,"detail":"average of 2 sensors (Front sensor A 73.8%, Front sensor B 74.8%) at 74.3% (threshold 30%)"}
+{"ts":"2026-07-01T17:15:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":60.8,"detail":"Back sensor at 60.8% (threshold 30%)"}
+{"ts":"2026-07-01T20:00:00.000Z","type":"moisture.normal","zone":"timer-1:2","name":"Back lawn","sensor":"back-a","sensorName":"Back sensor","moisturePct":58,"was":"high","minutes":165}
+{"ts":"2026-07-01T20:00:00.000Z","type":"simulation.note","note":"The soil has drained"}
+{"ts":"2026-07-01T20:15:00.000Z","type":"moisture.normal","zone":"timer-1:1","name":"Front lawn","sensor":"front-a","sensorName":"Front sensor A","moisturePct":55.8,"was":"high","minutes":180}
+{"ts":"2026-07-01T20:15:00.000Z","type":"moisture.normal","zone":"timer-1:1","name":"Front lawn","sensor":"front-b","sensorName":"Front sensor B","moisturePct":56.8,"was":"high","minutes":180}
+{"ts":"2026-07-01T21:00:00.000Z","type":"service.stopped","reason":"end of simulation"}

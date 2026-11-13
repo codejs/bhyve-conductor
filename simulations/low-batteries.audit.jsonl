@@ -1,0 +1,11 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"battery.low","kind":"timer","id":"hose-1","name":"Hose timer","batteryPct":15,"thresholdPct":20}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":35.5,"detail":"average of 2 sensors (Front sensor A 35%, Front sensor B 36%) at 35.5% (threshold 30%)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":37,"detail":"Back sensor at 37% (threshold 30%)"}
+{"ts":"2026-07-01T11:30:00.000Z","type":"simulation.note","note":"Front sensor A battery drops to 18%"}
+{"ts":"2026-07-01T11:45:00.000Z","type":"battery.low","kind":"sensor","id":"front-a","name":"Front sensor A","batteryPct":18,"thresholdPct":20}
+{"ts":"2026-07-01T12:30:00.000Z","type":"simulation.note","note":"Front sensor A battery replaced"}
+{"ts":"2026-07-01T12:45:00.000Z","type":"battery.ok","kind":"sensor","id":"front-a","name":"Front sensor A","batteryPct":100}
+{"ts":"2026-07-01T13:30:00.000Z","type":"simulation.note","note":"Hose timer batteries replaced"}
+{"ts":"2026-07-01T14:00:00.000Z","type":"battery.ok","kind":"timer","id":"hose-1","name":"Hose timer","batteryPct":100}
+{"ts":"2026-07-01T15:00:00.000Z","type":"service.stopped","reason":"end of simulation"}

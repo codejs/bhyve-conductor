@@ -1,0 +1,6 @@
+{"severity":"info","text":"▶️ Lawn conductor started, watching 2 zone(s)","type":"service.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 27% → 24 min","type":"sequence.started","ts":"2026-07-01T11:00:00.000Z","sentAt":"2026-07-01T11:00:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 06:00","type":"sequence.finished","ts":"2026-07-01T12:04:00.000Z","sentAt":"2026-07-01T12:04:00.000Z"}
+{"severity":"info","text":"💧 <b>Watering started</b>: Front lawn\n24 min in 3 cycles (20 min soak)\n• Front lawn: soil 25% → 24 min","type":"sequence.started","ts":"2026-07-01T16:00:00.000Z","sentAt":"2026-07-01T16:00:00.000Z"}
+{"severity":"info","text":"✅ <b>Watering finished</b>: Front lawn\n24 min in 3 cycles, started Jul 1, 11:00","type":"sequence.finished","ts":"2026-07-01T17:04:00.000Z","sentAt":"2026-07-01T17:04:00.000Z"}
+{"severity":"warning","text":"⏱️ <b>Front lawn is still dry</b> after its full daily allowance (48 min): 23%, threshold 30%\nCheck for a broken valve, clogged nozzle or misplaced sensor, or raise maxMinutesPerDay.","type":"zone.daily_limit_reached","ts":"2026-07-01T21:00:00.000Z","sentAt":"2026-07-01T21:00:00.000Z"}

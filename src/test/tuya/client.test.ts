@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchCall, jsonResponse, mockFetch, type FetchMock } from '../utils/fetch.ts';
+import { fetchCall, hangingFetch, jsonResponse, mockFetch, type FetchMock } from '../utils/fetch.ts';
 import { scaleOf, TuyaClient, type TuyaSpecification } from '../../tuya/client.ts';
 
 const CLIENT_ID = 'test-client-id';
@@ -70,6 +70,21 @@ describe('TuyaClient', () => {
 
       const nonces = [0, 1, 2].map((n) => fetchCall(fetchMock, n).headers.nonce);
       expect(new Set(nonces).size).toBe(3);
+    });
+  });
+
+  describe('unresponsive server', () => {
+    it('times out instead of hanging (query string left out of the message)', async () => {
+      const quick = new TuyaClient({ clientId: CLIENT_ID, clientSecret: SECRET, baseUrl: BASE, requestTimeoutMs: 50 });
+      fetchMock.mockImplementationOnce(hangingFetch);
+
+      await expect(quick.getStatus('dev1')).rejects.toThrow('Tuya GET /v1.0/token timed out after 0.05s');
+    });
+
+    it('describes network failures', async () => {
+      fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+
+      await expect(client.getStatus('dev1')).rejects.toThrow('Tuya GET /v1.0/token TypeError: fetch failed');
     });
   });
 

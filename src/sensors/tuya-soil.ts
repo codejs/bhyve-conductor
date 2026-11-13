@@ -12,6 +12,8 @@ export interface TuyaSoilOptions {
 
 const DEFAULT_TEMP_CODES = ['temp_current', 'va_temperature', 'temperature'];
 const DEFAULT_BATTERY_CODES = ['battery_percentage', 'va_battery', 'battery'];
+/** Sensors without a battery percentage often report a coarse level instead; map it to a rough %. */
+const BATTERY_STATE_PCT: Record<string, number> = { low: 10, middle: 50, high: 100 };
 
 /** Reads Tuya Zigbee soil moisture sensors (via the MOES gateway) from the Tuya cloud. */
 export class TuyaSoilSource implements MoistureSource {
@@ -19,6 +21,11 @@ export class TuyaSoilSource implements MoistureSource {
   readonly #tuya: TuyaClient;
   readonly #opts: Required<TuyaSoilOptions>;
   readonly #specs = new Map<string, TuyaSpecification>();
+  #lastErrors: { sensorId: string; error: string }[] = [];
+
+  get lastErrors(): readonly { sensorId: string; error: string }[] {
+    return this.#lastErrors;
+  }
 
   constructor(tuya: TuyaClient, opts: TuyaSoilOptions) {
     this.#tuya = tuya;
@@ -49,10 +56,16 @@ export class TuyaSoilSource implements MoistureSource {
   async read(): Promise<MoistureReading[]> {
     const results = await Promise.allSettled(this.#opts.sensorIds.map((id) => this.#readOne(id)));
     const readings: MoistureReading[] = [];
+    const errors: { sensorId: string; error: string }[] = [];
     results.forEach((r, i) => {
+      const sensorId = this.#opts.sensorIds[i] ?? '?';
       if (r.status === 'fulfilled') readings.push(r.value);
-      else log.warn(`Tuya soil sensor ${this.#opts.sensorIds[i]} read failed`, r.reason);
+      else {
+        log.warn(`Tuya soil sensor ${sensorId} read failed`, r.reason);
+        errors.push({ sensorId, error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
+      }
     });
+    this.#lastErrors = errors;
     return readings;
   }
 
@@ -69,7 +82,10 @@ export class TuyaSoilSource implements MoistureSource {
 
     const updateTime = typeof device.update_time === 'number' ? device.update_time : undefined;
     const temperatureC = this.#numeric(status, spec, this.#opts.temperatureCodes);
-    const batteryPct = this.#numeric(status, spec, this.#opts.batteryCodes);
+    const stateValue = status.find((dp) => dp.code === 'battery_state')?.value;
+    const batteryPct =
+      this.#numeric(status, spec, this.#opts.batteryCodes) ??
+      (typeof stateValue === 'string' ? BATTERY_STATE_PCT[stateValue] : undefined);
 
     return {
       sensorId: deviceId,

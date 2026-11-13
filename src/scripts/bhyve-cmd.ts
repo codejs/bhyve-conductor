@@ -1,8 +1,8 @@
 /**
  * Sends a manual command to a B-hyve device.
- *   pnpm bhyve:cmd start <deviceId> <station> <minutes>
- *   pnpm bhyve:cmd stop <deviceId>
- *   pnpm bhyve:cmd delay <deviceId> <hours>      (0 cancels)
+ *   npm run bhyve:cmd -- start <deviceId> <station> <minutes>
+ *   npm run bhyve:cmd -- stop <deviceId>
+ *   npm run bhyve:cmd -- delay <deviceId> <hours>      (0 cancels)
  */
 import { BhyveClient } from '../bhyve/client.ts';
 import { loadConfig } from '../config.ts';

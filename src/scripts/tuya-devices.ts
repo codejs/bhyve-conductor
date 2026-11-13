@@ -1,7 +1,7 @@
 /**
  * Lists Tuya devices linked to your cloud project, with their current data points and scales.
  * Use it to find the soil sensors' IDs and the moisture data-point code.
- * Usage: pnpm tuya:devices [--json]
+ * Usage: npm run tuya:devices -- [--json]
  */
 import { loadConfig } from '../config.ts';
 import { scaleOf, TuyaClient } from '../tuya/client.ts';

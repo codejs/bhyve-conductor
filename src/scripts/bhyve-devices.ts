@@ -1,4 +1,4 @@
-/** Lists B-hyve devices and zones. Usage: pnpm bhyve:devices [--json] */
+/** Lists B-hyve devices and zones. Usage: npm run bhyve:devices -- [--json] */
 import { BhyveClient } from '../bhyve/client.ts';
 import { loadConfig } from '../config.ts';
 

@@ -1,7 +1,8 @@
 # custom ignores
 dist
-package-lock.json
+pnpm-lock.yaml
 yarn.lock
+bhyve-conductor.zip
 
 # JetBrains IDEs (WebStorm, PyCharm, etc.)
 .idea/

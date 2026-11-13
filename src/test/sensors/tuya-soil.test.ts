@@ -91,6 +91,32 @@ describe('TuyaSoilSource', () => {
     expect(reading).toMatchObject({ moisturePct: 42.5, temperatureC: 18, batteryPct: 60 });
   });
 
+  it.each([
+    ['low', 10],
+    ['middle', 50],
+    ['high', 100],
+  ])('maps a coarse battery_state "%s" to %s%% when there is no battery percentage', async (state, pct) => {
+    const { tuya } = fakeTuya({ s1: device('s1', [{ code: 'humidity', value: 30 }, { code: 'battery_state', value: state }]) });
+
+    const [reading] = await new TuyaSoilSource(tuya, { sensorIds: ['s1'], moistureCode: 'humidity' }).read();
+
+    expect(reading?.batteryPct).toBe(pct);
+  });
+
+  it('prefers a battery percentage over battery_state', async () => {
+    const { tuya } = fakeTuya({
+      s1: device('s1', [
+        { code: 'humidity', value: 30 },
+        { code: 'battery_state', value: 'low' },
+        { code: 'battery_percentage', value: 64 },
+      ]),
+    });
+
+    const [reading] = await new TuyaSoilSource(tuya, { sensorIds: ['s1'], moistureCode: 'humidity' }).read();
+
+    expect(reading?.batteryPct).toBe(64);
+  });
+
   it('fetches status separately when the device details do not include it', async () => {
     const { client, tuya } = fakeTuya({ s1: device('s1', undefined) });
     client.getStatus.mockResolvedValueOnce([{ code: 'humidity', value: 22 }]);
@@ -142,6 +168,24 @@ describe('TuyaSoilSource', () => {
     const warnings = warn.mock.calls.map(([msg]) => msg);
     expect(warnings).toHaveLength(2);
     expect(warnings[0]).toContain('nomoisture');
+    // ...and says why, for the audit trail
+    expect(source.lastErrors).toEqual([
+      { sensorId: 'nomoisture', error: expect.stringContaining('No numeric "humidity" data point') },
+      { sensorId: 'unknown', error: 'unknown device unknown' },
+    ]);
+  });
+
+  it('clears the errors once sensors read fine again', async () => {
+    const devices: Record<string, ReturnType<typeof device>> = {};
+    const { tuya } = fakeTuya(devices);
+    const source = new TuyaSoilSource(tuya, { sensorIds: ['s1'], moistureCode: 'humidity' });
+
+    await source.read();
+    expect(source.lastErrors).toHaveLength(1);
+
+    devices.s1 = device('s1', [{ code: 'humidity', value: 30 }]);
+    await source.read();
+    expect(source.lastErrors).toEqual([]);
   });
 
   it('reports which data points exist when the moisture code is wrong', async () => {

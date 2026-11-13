@@ -1,0 +1,19 @@
+{"ts":"2026-07-01T11:00:00.000Z","type":"service.started","mode":"continuous","dryRun":false,"zones":2}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"dry","action":"water","moisturePct":27,"minutes":24,"detail":"average of 2 sensors (Front sensor A 26%, Front sensor B 28%) at 27% is below 30%; watering 24 min"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"zone.decision","zone":"timer-1:2","name":"Back lawn","reason":"moist","action":"none","moisturePct":37,"detail":"Back sensor at 37% (threshold 30%)"}
+{"ts":"2026-07-01T11:00:00.000Z","type":"sequence.started","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"waves":[[{"station":1,"runTime":8}],[{"station":1,"runTime":8}],[{"station":1,"runTime":8}]],"soakMinutes":20,"plannedMinutes":24,"zones":[{"zone":"timer-1:1","name":"Front lawn","moisturePct":27,"minutes":24,"why":"average of 2 sensors (Front sensor A 26%, Front sensor B 28%) at 27% is below 30%; watering 24 min"}]}
+{"ts":"2026-07-01T11:00:00.000Z","type":"wave.sent","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycle":1,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T11:00:06.000Z","type":"simulation.note","note":"B-hyve API goes down"}
+{"ts":"2026-07-01T11:00:20.000Z","type":"connection.lost","service":"bhyve","error":"B-hyve GET /devices/timer-1 failed: HTTP 503 Service Unavailable"}
+{"ts":"2026-07-01T11:00:20.000Z","type":"wave.unconfirmed","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycle":1,"of":3,"reason":"no acknowledgement and the device status could not be read; counted as delivered so it is never sent twice"}
+{"ts":"2026-07-01T11:10:00.000Z","type":"simulation.note","note":"B-hyve API is back; the controller acknowledges commands again"}
+{"ts":"2026-07-01T11:15:20.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"cooldown","action":"skip","moisturePct":26.9,"detail":"average of 2 sensors (Front sensor A 25.9%, Front sensor B 27.9%) at 26.9% but last watered 2026-07-01T11:00:00.000Z; cooling down until 2026-07-01T15:00:00.000Z"}
+{"ts":"2026-07-01T11:28:00.000Z","type":"connection.restored","service":"bhyve","downSince":"2026-07-01T11:00:20.000Z","outageMinutes":27.7,"failures":1,"lastError":"B-hyve GET /devices/timer-1 failed: HTTP 503 Service Unavailable"}
+{"ts":"2026-07-01T11:28:00.000Z","type":"wave.sent","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycle":2,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T11:28:00.000Z","type":"wave.confirmed","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycle":2,"of":3,"via":"event"}
+{"ts":"2026-07-01T11:45:20.000Z","type":"zone.decision","zone":"timer-1:1","name":"Front lawn","reason":"moist","action":"none","moisturePct":30.1,"detail":"average of 2 sensors (Front sensor A 29.1%, Front sensor B 31.1%) at 30.1% (threshold 30%)"}
+{"ts":"2026-07-01T11:56:00.000Z","type":"wave.sent","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycle":3,"of":3,"stations":[{"station":1,"runTime":8}],"attempt":1}
+{"ts":"2026-07-01T11:56:00.000Z","type":"wave.confirmed","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycle":3,"of":3,"via":"event"}
+{"ts":"2026-07-01T11:56:00.000Z","type":"sequence.completed","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycles":3,"deliveredMinutes":24}
+{"ts":"2026-07-01T12:04:00.000Z","type":"sequence.finished","sequence":"15d02568","device":"timer-1","zoneNames":["Front lawn"],"cycles":3,"deliveredMinutes":24,"startedAt":"2026-07-01T11:00:00.000Z"}
+{"ts":"2026-07-01T13:00:00.000Z","type":"service.stopped","reason":"end of simulation"}
