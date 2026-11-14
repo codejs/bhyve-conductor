@@ -149,6 +149,20 @@ describe('describe / formatEvent', () => {
     );
   });
 
+  it('describes a change of settings', () => {
+    const e = ev(NOW.toISOString(), 'config.changed', {
+      by: '@owner via Telegram',
+      zone: 'dev1:1',
+      name: 'Front lawn',
+      changes: [
+        { key: 'thresholdPct', from: 30, to: 35 },
+        { key: 'targetPct', from: 40, to: 45, derived: true },
+      ],
+    });
+    expect(describeEvent(e)).toBe('settings of zone dev1:1 (Front lawn) CHANGED by @owner via Telegram: thresholdPct 30 → 35, targetPct 40 → 45 (follows)');
+    expect(describeEvent(ev(NOW.toISOString(), 'config.changed', { zone: 'z', name: 'n', by: 'b' }))).toBe('settings of zone z (n) CHANGED by b: ');
+  });
+
   it('falls back to the raw fields for unknown event types', () => {
     expect(describeEvent({ ts: NOW.toISOString(), type: 'future.event' as AuditEvent['type'], x: 1 })).toBe('{"x":1}');
   });

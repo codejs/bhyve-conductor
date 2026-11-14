@@ -190,6 +190,14 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
       const list = (v: unknown) => (Array.isArray(v) && v.length > 0 ? v.map(String).join(', ') : 'none');
       return `conductor resumed by ${String(e.by)} after ${String(e.pausedMinutes)} min (held sequences: ${String(e.held)}; continued: ${list(e.continued)}; discarded: ${list(e.discarded)})`;
     }
+    case 'config.changed': {
+      const changes = Array.isArray(e.changes)
+        ? (e.changes as { key?: unknown; from?: unknown; to?: unknown; derived?: unknown }[])
+            .map((c) => `${String(c.key)} ${String(c.from)} → ${String(c.to)}${c.derived ? ' (follows)' : ''}`)
+            .join(', ')
+        : '';
+      return `settings of zone ${String(e.zone)} (${String(e.name)}) CHANGED by ${String(e.by)}: ${changes}`;
+    }
     case 'conductor.still_paused':
       return `started while PAUSED (since ${at(e.since)} by ${String(e.by)})`;
     case 'command.rejected':

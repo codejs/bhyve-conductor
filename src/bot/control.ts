@@ -27,7 +27,8 @@ export interface ControlDeps {
   timeZone?: string | undefined;
 }
 
-const via = (actor: Actor): string => `${actorName(actor)} via Telegram`;
+/** Who made a change, for messages and the audit trail. */
+export const via = (actor: Actor): string => `${actorName(actor)} via Telegram`;
 
 export const buildControlCommands = ({ control, timeZone }: ControlDeps): MutableCommand[] => {
   const at = (d: Date) => shortTime(d, timeZone);

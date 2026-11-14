@@ -2,7 +2,7 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FileAuditLog, lastAuditEvent, MemoryAuditLog, parseAudit, readAudit } from '../../audit/audit.ts';
+import { FileAuditLog, lastAuditEvent, MemoryAuditLog, parseAudit, readAudit, readAuditTail } from '../../audit/audit.ts';
 import { ConnectionHealth } from '../../audit/health.ts';
 import { log } from '../../log.ts';
 
@@ -175,5 +175,76 @@ describe('ConnectionHealth', () => {
     list[0]?.since.setFullYear(2000);
     health.ok('weather');
     expect(health.outages()).toEqual([{ service: 'tuya', since: new Date('2026-07-01T12:00:00Z'), failures: 2, lastError: 'HTTP 502' }]);
+  });
+});
+
+describe('readAuditTail', () => {
+  let dir: string;
+  let path: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'audit-tail-'));
+    path = join(dir, 'audit.jsonl');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const line = (i: number, extra = '') => `${JSON.stringify({ ts: `2026-07-01T12:00:${String(i).padStart(2, '0')}.000Z`, type: 'poll.failed', error: `e${i}${extra}` })}\n`;
+
+  it('reads a small file whole', async () => {
+    await writeFile(path, line(1) + line(2));
+
+    expect(await readAuditTail(path, 1024 * 1024)).toEqual({
+      events: [expect.objectContaining({ error: 'e1' }), expect.objectContaining({ error: 'e2' })],
+      skipped: 0,
+      truncated: false,
+    });
+  });
+
+  it('reads only the end of a large file, dropping the line it starts in the middle of', async () => {
+    const lines = Array.from({ length: 50 }, (_, i) => line(i));
+    await writeFile(path, lines.join(''));
+    const size = lines.join('').length;
+    const tail = lines.slice(-10).join('').length + 5; // 10 whole lines plus the end of an 11th
+
+    const result = await readAuditTail(path, tail);
+
+    expect(result.truncated).toBe(true);
+    expect(result.skipped).toBe(0); // the partial line is dropped, not counted as unreadable
+    expect(result.events.map((e) => e.error)).toEqual(Array.from({ length: 10 }, (_, i) => `e${40 + i}`));
+    expect(tail).toBeLessThan(size);
+  });
+
+  it('never splits a multi-byte character where it cuts', async () => {
+    const lines = Array.from({ length: 20 }, (_, i) => line(i, ' 💧 é ü'));
+    await writeFile(path, lines.join(''));
+
+    for (let bytes = 50; bytes < 400; bytes += 7) {
+      const { events, skipped } = await readAuditTail(path, bytes);
+      expect(skipped).toBe(0);
+      for (const e of events) expect(e.error).toMatch(/ 💧 é ü$/);
+    }
+  });
+
+  it('skips a torn last line (being written)', async () => {
+    await writeFile(path, `${line(1)}{"ts":"2026-07-01T12:00:02.000Z","ty`);
+
+    expect(await readAuditTail(path, 1024)).toMatchObject({ events: [expect.objectContaining({ error: 'e1' })], skipped: 1, truncated: false });
+  });
+
+  it('returns nothing (not an error) when there is no file yet', async () => {
+    expect(await readAuditTail(join(dir, 'missing.jsonl'), 1024)).toEqual({ events: [], skipped: 0, truncated: false });
+  });
+
+  it('copes with a limit smaller than one line', async () => {
+    await writeFile(path, line(1) + line(2));
+
+    expect(await readAuditTail(path, 10)).toEqual({ events: [], skipped: 0, truncated: true });
+  });
+
+  it('passes on other read errors', async () => {
+    await expect(readAuditTail(dir, 1024)).rejects.toThrow(); // a directory
   });
 });

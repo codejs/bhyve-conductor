@@ -229,14 +229,32 @@ export interface ConductorConfig {
 
 export const zoneKey = (z: { deviceId: string; station: number }): string => `${z.deviceId}:${z.station}`;
 
-/** Validates a parsed config object and fills in defaults (per-zone value > `defaults` > built-in). */
-export const parseConductorConfig = (raw: unknown): ConductorConfig => {
+export interface ConfigIssue {
+  /** Where, e.g. "zones.1.targetPct" ("(root)" for the whole file). */
+  path: string;
+  message: string;
+}
+
+/** Validates a parsed config object; on success, fills in defaults (per-zone value > `defaults` > built-in). */
+export const validateConductorConfig = (raw: unknown): { ok: true; config: ConductorConfig } | { ok: false; issues: ConfigIssue[] } => {
   const result = FileSchema.safeParse(raw);
   if (!result.success) {
-    const issues = result.error.issues.map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`).join('\n');
-    throw new Error(`Invalid conductor config:\n${issues}`);
+    return { ok: false, issues: result.error.issues.map((i) => ({ path: i.path.join('.') || '(root)', message: i.message })) };
   }
-  const { pollIntervalMinutes, dryRun, forecastHours, recovery, alerts, notifications, defaults, zones } = result.data;
+  return { ok: true, config: resolve(result.data) };
+};
+
+/** Like validateConductorConfig, but throws a readable error listing every problem. */
+export const parseConductorConfig = (raw: unknown): ConductorConfig => {
+  const result = validateConductorConfig(raw);
+  if (!result.ok) {
+    throw new Error(`Invalid conductor config:\n${result.issues.map((i) => `  - ${i.path}: ${i.message}`).join('\n')}`);
+  }
+  return result.config;
+};
+
+const resolve = (data: z.infer<typeof FileSchema>): ConductorConfig => {
+  const { pollIntervalMinutes, dryRun, forecastHours, recovery, alerts, notifications, defaults, zones } = data;
 
   return {
     pollIntervalMinutes,
@@ -279,6 +297,29 @@ export const parseConductorConfig = (raw: unknown): ConductorConfig => {
       };
     }),
   };
+};
+
+/** The zone settings that may be changed while the conductor runs (e.g. with /config in Telegram). */
+export const EDITABLE_ZONE_RULES = [
+  'thresholdPct',
+  'targetPct',
+  'runMinutes',
+  'maxMinutesPerDay',
+  'cooldownMinutes',
+  'maxCycleMinutes',
+  'soakMinutes',
+] as const;
+export type EditableZoneRule = (typeof EDITABLE_ZONE_RULES)[number];
+
+/**
+ * Why a value can't be used for one of the editable settings, checked against the same schema as the
+ * config file, or undefined if it's fine. (Rules between settings, e.g. target above threshold, are
+ * checked on the whole config.)
+ */
+export const zoneRuleProblem = (key: EditableZoneRule, value: number): string | undefined => {
+  const schema = key === 'targetPct' ? ExtraSchema.shape.targetPct : RulesSchema.shape[key];
+  const result = schema.safeParse(value);
+  return result.success ? undefined : (result.error.issues[0]?.message ?? 'invalid value');
 };
 
 /**

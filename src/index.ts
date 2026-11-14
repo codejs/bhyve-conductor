@@ -7,18 +7,21 @@
  *   npm run conductor:check     one dry-run cycle, then exit (good for checking the config)
  *   npm run audit               review what happened (watering, outages, recoveries)
  * With TELEGRAM_COMMANDS=on, the Telegram chat can also ask for /status, /sensors_read and
- * /bhyve_devices, and with TELEGRAM_COMMAND_PASSPHRASE set, /pause and /resume automatic watering
- * (see docs/telegram-commands.md).
+ * /bhyve_devices and /audit, and with TELEGRAM_COMMAND_PASSPHRASE set, /pause and /resume automatic
+ * watering and change zone settings with /config (see docs/telegram-commands.md).
  */
 import { parseArgs } from 'node:util';
-import { FileAuditLog, lastAuditEvent, teeAudit, type AuditSink } from './audit/audit.ts';
+import { FileAuditLog, lastAuditEvent, readAuditTail, teeAudit, type AuditSink } from './audit/audit.ts';
 import { BhyveClient } from './bhyve/client.ts';
 import { commandPolicy } from './bot/auth.ts';
 import { CommandBot } from './bot/bot.ts';
+import { buildAuditCommand } from './bot/audit-command.ts';
 import { buildCommands, zonesBySensor } from './bot/commands.ts';
+import { buildConfigCommand } from './bot/config-command.ts';
 import { buildControlCommands } from './bot/control.ts';
 import { passphraseProblem } from './bot/conversation.ts';
 import { assertForecastReady, loadConductorConfig } from './conductor/config.ts';
+import { ConfigEditor } from './conductor/config-editor.ts';
 import { Monitor } from './conductor/monitor.ts';
 import { FileStateStore } from './conductor/state.ts';
 import { loadConfig } from './config.ts';
@@ -34,6 +37,8 @@ import type { WeatherProvider } from './weather/types.ts';
 
 /** How long to keep the socket open after a one-shot command so it is flushed before closing. */
 const SEND_GRACE_MS = 3_000;
+/** /audit reads at most this much of the end of the audit file (it grows forever). */
+const AUDIT_TAIL_BYTES = 2 * 1024 * 1024;
 
 const main = async (): Promise<void> => {
   const { values: args } = parseArgs({
@@ -83,9 +88,9 @@ const main = async (): Promise<void> => {
     // The message never contains the passphrase itself.
     const problem = passphraseProblem(passphrase);
     if (problem) throw new Error(`TELEGRAM_COMMAND_PASSPHRASE ${problem}`);
-    if (!policy) log.warn('TELEGRAM_COMMAND_PASSPHRASE is set but TELEGRAM_COMMANDS is off: /pause and /resume are disabled');
+    if (!policy) log.warn('TELEGRAM_COMMAND_PASSPHRASE is set but TELEGRAM_COMMANDS is off: /pause, /resume and /config are disabled');
   } else if (policy) {
-    log.info('Telegram /pause and /resume are off: set TELEGRAM_COMMAND_PASSPHRASE to enable them');
+    log.info('Telegram /pause, /resume and /config are off: set TELEGRAM_COMMAND_PASSPHRASE to enable them');
   }
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     if (config.dryRun) {
@@ -166,9 +171,27 @@ const main = async (): Promise<void> => {
       status: () => monitor.status(),
       timeZone: config.notifications.timeZone,
     });
-    // Pause/resume only exist with a passphrase; the bot refuses mutable commands without one anyway.
-    const control = passphrase === undefined ? [] : buildControlCommands({ control: monitor, timeZone: config.notifications.timeZone });
-    bot = new CommandBot({ api: telegram, policy, commands: [...commands, ...control], passphrase, reply: (html) => q.enqueue(html), audit });
+    const auditCommand = buildAuditCommand({
+      read: () => readAuditTail(env.CONDUCTOR_AUDIT, AUDIT_TAIL_BYTES),
+      timeZone: config.notifications.timeZone,
+    });
+    // Changes only exist with a passphrase; the bot refuses mutable commands without one anyway.
+    const changes =
+      passphrase === undefined
+        ? []
+        : [
+            ...buildControlCommands({ control: monitor, timeZone: config.notifications.timeZone }),
+            // Edits conductor.json, and the zones of `config`: the very object the monitor runs with.
+            buildConfigCommand({ editor: new ConfigEditor({ path: env.CONDUCTOR_CONFIG, config, audit }) }),
+          ];
+    bot = new CommandBot({
+      api: telegram,
+      policy,
+      commands: [...commands, auditCommand, ...changes],
+      passphrase,
+      reply: (html) => q.enqueue(html),
+      audit,
+    });
   } else if (policy && args.once) {
     log.info('Telegram commands are only answered by the continuously running service (not with --once)');
   }

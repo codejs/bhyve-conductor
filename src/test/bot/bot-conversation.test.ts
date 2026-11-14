@@ -3,7 +3,7 @@ import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot, type CommandBotOptions } from '../../bot/bot.ts';
 import type { BotCommand } from '../../bot/commands.ts';
-import type { MutableCommand, Step } from '../../bot/conversation.ts';
+import type { InteractiveCommand, MutableCommand, Step } from '../../bot/conversation.ts';
 import { VirtualClock } from '../../clock.ts';
 import { log } from '../../log.ts';
 import type { TelegramMessage, TelegramUpdate } from '../../notify/telegram.ts';
@@ -71,7 +71,7 @@ const statusCommand = (): BotCommand & { run: ReturnType<typeof vi.fn> } => ({
   run: vi.fn(async () => '🌱 status'),
 });
 
-const setup = (opts: { policy?: CommandPolicy; options?: Partial<CommandBotOptions>; commands?: (BotCommand | MutableCommand)[] } = {}) => {
+const setup = (opts: { policy?: CommandPolicy; options?: Partial<CommandBotOptions>; commands?: (BotCommand | MutableCommand | InteractiveCommand)[] } = {}) => {
   const clock = new VirtualClock(START);
   const fake = fakeBotApi();
   const audit = new MemoryAuditLog(() => clock.now());
@@ -331,11 +331,11 @@ describe('CommandBot conversations', () => {
       expectNoLeak(t);
     });
 
-    it.each(['', 'x'.repeat(5000), PASS.toUpperCase(), `${PASS}.`, PASS.replace(' ', '  ')])('treats %j as wrong', async (answer) => {
+    it.each(['x'.repeat(5000), PASS.toUpperCase(), `${PASS}.`, PASS.replace(' ', '  '), 'abcdefgh'])('treats %j as wrong', async (answer) => {
       const t = track(setup());
       await t.start();
 
-      await t.send('/now', answer || ' ');
+      await t.send('/now', answer);
 
       expect(t.nowRun).not.toHaveBeenCalled();
       expect(t.audit.ofType('command.auth_failed')).toHaveLength(1);
@@ -433,6 +433,35 @@ describe('CommandBot conversations', () => {
       await t.send('/pause', 'hmm', 'what', 'yes', 'y', 'ok', PASS);
 
       expect(t.pauseRun).toHaveBeenCalledOnce();
+    });
+
+    it.each(['28', ' ', 'abc', '1234567'])(
+      'asks again after %j at the passphrase question (too short to be the passphrase, e.g. a late answer to a question)',
+      async (answer) => {
+        const t = track(setup());
+        await t.start();
+
+        const [, short] = await t.send('/now', answer);
+
+        expect(t.fake.sent.at(-1)).toEqual({
+          html: "🔐 That's too short to be the passphrase. Send the passphrase, or <b>cancel</b>.",
+          opts: { replyToMessageId: short?.message?.message_id, forceReply: true, placeholder: 'passphrase or cancel' },
+        });
+        expect(t.audit.ofType('command.auth_failed')).toEqual([]);
+        expect(t.fake.deleted).toEqual([]);
+        await t.send(PASS);
+        expect(t.nowRun).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('still gives up after too many short answers at the passphrase question', async () => {
+      const t = track(setup({ options: { maxInvalidAnswers: 3 } }));
+      await t.start();
+
+      await t.send('/now', '1', '2', '3');
+
+      expect(t.said().at(-1)).toBe('🤷 Too many unexpected answers: /now cancelled. Nothing changed.');
+      expect(t.nowRun).not.toHaveBeenCalled();
     });
 
     it('"yes" (an answer word) at the passphrase question is asked again, not counted as a wrong passphrase', async () => {
@@ -696,7 +725,7 @@ describe('CommandBot conversations', () => {
 
       expect(t.fake.deleted).toEqual([cmd?.message?.message_id]);
       expect(t.replies).toEqual([
-        "⚠️ /pause takes no arguments. 🔐 I deleted your message because it contained the passphrase. Send the command alone; I ask for the passphrase when it's needed.",
+        "⚠️ /pause was not run. 🔐 I deleted your message because it contained the passphrase. Send the command alone; I ask for the passphrase when it's needed.",
       ]);
       expect(t.bot.pendingConversation).toBeUndefined();
       expect(t.pauseRun).not.toHaveBeenCalled();
@@ -914,6 +943,308 @@ describe('CommandBot conversations', () => {
 
       expect(t.replies).toEqual(['🐢 Too many commands; ignoring them for up to 60 s.']);
       expect(t.pause.begin).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('read-only conversations and free-form answers', () => {
+    /** /browse: an interactive (read-only) command with pages; "/browse 2" starts on page 2. */
+    const browse = () => {
+      const read = vi.fn();
+      const page = (n: number): Step => ({
+        kind: 'input',
+        text: `📜 page ${n}`,
+        hint: 'Reply more or done.',
+        placeholder: 'more or done',
+        read: (answer) => {
+          read(answer);
+          const word = answer.trim().toLowerCase();
+          if (word === 'done') return { next: { kind: 'done', text: '👋 closed' } };
+          if (word === 'more') return n < 3 ? { next: page(n + 1) } : { invalid: 'That was the last page.' };
+          if (word === 'boom') throw new Error('cannot read the audit file');
+          return { invalid: 'Say more or done.' };
+        },
+      });
+      const command: InteractiveCommand = {
+        kind: 'interactive',
+        name: 'browse',
+        description: 'Browse',
+        acceptsArgs: true,
+        begin: vi.fn((_actor, args: string) => page(args === '' ? 1 : Number(args))),
+      };
+      return { command, read };
+    };
+    /** /tune: a mutable command with a free-form answer before the passphrase. */
+    const tune = () => {
+      const apply = vi.fn(async (value: number): Promise<string | { text: string; error: string }> => `✅ set to ${value}`);
+      const command: MutableCommand = {
+        kind: 'mutable',
+        name: 'tune',
+        description: 'Tune',
+        begin: () => ({
+          kind: 'input',
+          text: 'New value?',
+          hint: 'Reply a number from 1 to 9.',
+          read: (answer) => {
+            const value = Number(answer.trim());
+            if (!/^\d$/.test(answer.trim()) || value < 1) return { invalid: 'That is not a number from 1 to 9.' };
+            return { next: { kind: 'passphrase', text: `🔐 Passphrase to set ${value}?`, run: () => apply(value) } };
+          },
+        }),
+      };
+      return { command, apply };
+    };
+    const setupWith = (opts: Parameters<typeof setup>[0] = {}) => {
+      const b = browse();
+      const u = tune();
+      const s = scripted();
+      const t = setup({ ...opts, commands: [statusCommand(), b.command, u.command, s.pause] });
+      return { ...t, browse: b, tune: u, pauseRun: s.pauseRun };
+    };
+
+    it('pages through a read-only conversation without any passphrase', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      const [cmd] = await t.send('/browse');
+      expect(t.fake.sent[0]).toEqual({ html: '📜 page 1', opts: { replyToMessageId: cmd?.message?.message_id, forceReply: true, placeholder: 'more or done' } });
+      await t.send('more', 'MORE');
+      expect(t.said().at(-1)).toBe('📜 page 3');
+      await t.send('done');
+
+      expect(t.said().at(-1)).toBe('👋 closed');
+      expect(t.bot.pendingConversation).toBeUndefined();
+      expect(t.handled()).toEqual([expect.objectContaining({ command: 'browse', outcome: 'ok' })]);
+    });
+
+    it('passes arguments to commands that accept them', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse 2');
+
+      expect(t.browse.command.begin).toHaveBeenCalledWith({ id: OWNER.id, username: 'owner' }, '2');
+      expect(t.said()).toEqual(['📜 page 2']);
+    });
+
+    it('still refuses arguments for commands that do not accept them', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/tune 5');
+
+      expect(t.replies).toEqual(['⚠️ /tune takes no arguments.']);
+      expect(t.bot.pendingConversation).toBeUndefined();
+    });
+
+    it('never acts on a command carrying the passphrase, even one that accepts arguments', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      const [cmd] = await t.send(`/browse ${PASS}`);
+
+      expect(t.browse.command.begin).not.toHaveBeenCalled();
+      expect(t.fake.deleted).toEqual([cmd?.message?.message_id]);
+      expect(t.replies[0]).toMatch(/^⚠️ \/browse was not run\. 🔐 I deleted your message/);
+      expectNoLeak(t);
+    });
+
+    it('asks again, saying why, when a free-form answer is refused; gives up after too many', async () => {
+      const t = setupWith({ options: { maxInvalidAnswers: 3 } });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse', 'more', 'more', 'more');
+      expect(t.said().at(-1)).toBe('⚠️ That was the last page. Reply more or done.');
+      await t.send('hmm', 'what');
+
+      expect(t.said().at(-1)).toBe('🤷 Too many unexpected answers: /browse closed.');
+      expect(t.bot.pendingConversation).toBeUndefined();
+    });
+
+    it('escapes the reason a free-form answer was refused', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+      const evil: MutableCommand = {
+        kind: 'mutable',
+        name: 'evil',
+        description: 'x',
+        begin: () => ({ kind: 'input', text: 'Q?', hint: '<i>hint</i>', read: () => ({ invalid: '<b>bad</b> & <script>' }) }),
+      };
+      const bot = new CommandBot({ api: t.fake.bot, policy: PRIVATE, commands: [evil], passphrase: PASS, reply: () => {}, clock: t.clock });
+      await t.bot.stop();
+      active.push(bot);
+      bot.start();
+      await t.clock.advanceBy(0);
+
+      await t.send('/evil', 'x');
+
+      expect(t.said().at(-1)).toBe('⚠️ &lt;b&gt;bad&lt;/b&gt; &amp; &lt;script&gt; &lt;i&gt;hint&lt;/i&gt;');
+    });
+
+    it('reports a free-form answer that cannot be read, and ends', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse', 'boom');
+
+      expect(t.said().at(-1)).toBe('❌ /browse failed: cannot read the audit file. Nothing changed.');
+      expect(t.handled()).toEqual([expect.objectContaining({ outcome: 'failed', error: 'cannot read the audit file' })]);
+      expect(t.bot.pendingConversation).toBeUndefined();
+    });
+
+    it('never passes a message with the passphrase to a free-form question: it is deleted and asked again', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/tune');
+      const [leak] = await t.send(`my pass: ${PASS}`);
+
+      expect(t.fake.deleted).toEqual([leak?.message?.message_id]);
+      expect(t.said().at(-1)).toMatch(/^🔐 I deleted your message because it contained the passphrase\. Answer this question first/);
+      expect(t.bot.pendingConversation).toEqual({ command: 'tune', userId: OWNER.id });
+      expectNoLeak(t);
+    });
+
+    it('runs a mutable change after a free-form answer and the passphrase', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/tune', '0', '7');
+      expect(t.said()).toEqual(['New value?', '⚠️ That is not a number from 1 to 9. Reply a number from 1 to 9.', '🔐 Passphrase to set 7?']);
+      await t.send(PASS);
+
+      expect(t.tune.apply).toHaveBeenCalledWith(7);
+      expect(t.said().at(-1)).toBe('✅ set to 7');
+    });
+
+    it('records a change that reports it did not happen as failed, with its own message', async () => {
+      const t = setupWith();
+      t.tune.apply.mockResolvedValueOnce({ text: '❌ Not saved: the file changed. Nothing changed.', error: 'the file changed' });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/tune', '7', PASS);
+
+      expect(t.said().at(-1)).toBe('❌ Not saved: the file changed. Nothing changed.');
+      expect(t.handled()).toEqual([expect.objectContaining({ command: 'tune', outcome: 'failed', error: 'the file changed' })]);
+    });
+
+    it('refuses a read-only command that asks for the passphrase (fails closed)', async () => {
+      const sneaky: InteractiveCommand = {
+        kind: 'interactive',
+        name: 'sneaky',
+        description: 'x',
+        begin: () => ({ kind: 'passphrase', text: 'Passphrase?', run: async () => 'ran' }),
+      };
+      const t = setup({ commands: [sneaky, scripted().pause] });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/sneaky');
+
+      expect(t.said()).toEqual(['❌ /sneaky failed (internal error). Nothing changed.']);
+      expect(t.bot.pendingConversation).toBeUndefined();
+      expect(t.handled()).toEqual([expect.objectContaining({ command: 'sneaky', outcome: 'failed' })]);
+      expect(logs[3]).toHaveBeenCalledWith('Telegram commands: read-only /sneaky asked for the passphrase; refused');
+    });
+
+    it('works during a lockout (read-only), while changes stay locked', async () => {
+      const t = setupWith({ options: { maxPassphraseFailures: 1 } });
+      active.push(t.bot);
+      await t.start();
+      await t.send('/tune', '7', 'wrong passphrase');
+
+      await t.send('/browse');
+      expect(t.said().at(-1)).toBe('📜 page 1');
+      await t.send('/tune');
+      expect(t.said().at(-1)).toMatch(/^🔒 Changes are locked/);
+    });
+
+    it('ends quietly when nobody answers, and explains a late "more"', async () => {
+      const t = setupWith({ options: { conversationTimeoutMs: 2 * MIN } });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse');
+      await t.clock.advanceBy(2 * MIN);
+      expect(t.said()).toEqual(['📜 page 1']); // no "cancelled" message for browsing
+      expect(t.handled()).toEqual([expect.objectContaining({ command: 'browse', outcome: 'expired' })]);
+
+      await t.send('more');
+      expect(t.said().at(-1)).toBe('⌛ That question had expired, so nothing was done. Send /browse again if you still want to.');
+    });
+
+    it('says "closed" rather than "cancelled, nothing changed" on cancel', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse', 'cancel');
+      await t.send('/browse', '/cancel');
+
+      expect(t.said().filter((x) => x === '👋 /browse closed.')).toHaveLength(2);
+    });
+
+    it("gives way to someone else's command: browsing never holds up a change", async () => {
+      const t = setupWith({ policy: GROUP });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send(['/browse', inGroup(FAMILY)], ['/pause', inGroup(OWNER)]);
+
+      expect(t.said()).toContain("👋 @family's /browse was closed for /pause.");
+      expect(t.bot.pendingConversation).toEqual({ command: 'pause', userId: OWNER.id });
+      await t.send(['more', inGroup(FAMILY)]); // no longer theirs to answer
+      await t.send(['yes', inGroup(OWNER)], [PASS, inGroup(OWNER)]);
+      expect(t.pauseRun).toHaveBeenCalledOnce();
+    });
+
+    it("does not let browsing interrupt someone else's change", async () => {
+      const t = setupWith({ policy: GROUP });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send(['/pause', inGroup(OWNER)], ['/browse', inGroup(FAMILY)]);
+
+      expect(t.said().at(-1)).toBe("⏳ @owner is answering /pause. Try again when that's done.");
+      expect(t.bot.pendingConversation).toEqual({ command: 'pause', userId: OWNER.id });
+    });
+
+    it('starting over replaces your own browsing without fuss', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse', 'more', '/browse');
+
+      expect(t.said()).toEqual(['📜 page 1', '📜 page 2', '📜 page 1']);
+      expect(t.handled()[0]).toMatchObject({ command: 'browse', outcome: 'superseded' });
+    });
+
+    it('lists read-only conversations with the read-only commands in /help', async () => {
+      const b = browse();
+      const t = setup({ commands: [statusCommand(), b.command] });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/help');
+
+      expect(t.replies[0]).toBe(
+        ['🌱 <b>Lawn conductor commands</b> (read-only)', '/status: Status', '/browse: Browse', '/help: this list', '/cancel: close what is waiting for your answer'].join('\n'),
+      );
+    });
+
+    it('does not need a passphrase when every conversation is read-only', () => {
+      const { bot: api } = fakeBotApi();
+      expect(() => new CommandBot({ api, policy: PRIVATE, commands: [browse().command], reply: () => {} })).not.toThrow();
     });
   });
 });

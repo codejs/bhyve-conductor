@@ -8,21 +8,24 @@ running conductor questions:
 | `/status` | | Running since when, last and next poll, each zone's latest decision and soil %, watering in progress, unreachable services, open alerts |
 | `/sensors_read` | `npm run sensors:read` | A fresh reading of every sensor in `conductor.json`: moisture, temperature, battery, online, age, and which zone it's in |
 | `/bhyve_devices` | `npm run bhyve:devices` | Each B-hyve controller: connected, battery, mode, rain delay, watering now, zones |
+| `/audit` | `npm run audit` | The audit trail, a page at a time, made for a phone ([below](#the-audit-trail-audit)) |
 | `/help` (or `/start`) | | The list above |
 
-With a [passphrase](#pausing-and-resuming) set, the chat can also change one thing:
+With a [passphrase](#pausing-and-resuming) set, the chat can also change things:
 
 | Command | What it does |
 |---|---|
 | `/pause` | Pauses automatic (supplemental) watering, until `/resume` |
 | `/resume` | Resumes it, continuing or cancelling any watering that the pause put on hold |
-| `/cancel` | Cancels a `/pause` or `/resume` that is waiting for your answer |
+| `/config` | Changes a zone's watering settings ([below](#changing-settings-config)) |
+| `/cancel` | Cancels a change that is waiting for your answer (or closes `/audit`) |
 
 **The commands above are read-only.** None of them can start, stop or delay watering, or change
 anything on a controller or in the conductor. That is enforced in the code, not just by convention: they
 only get a B-hyve object with `getDevices` on it (see `src/bot/commands.ts`). `/pause` and `/resume`
-only switch the conductor's own automatic watering off and on; they never send anything to B-hyve
-themselves. `npm run bhyve:cmd` is deliberately not available from Telegram.
+only switch the conductor's own automatic watering off and on, and `/config` only changes the seven
+zone settings listed below; none of them sends anything to B-hyve. `npm run bhyve:cmd` is deliberately
+not available from Telegram.
 
 ## Setup
 
@@ -106,12 +109,15 @@ Every change ends with the passphrase, and nothing changes before it:
 
 ### Answers
 
+These apply to every change (`/pause`, `/resume`, `/config`):
+
 | You send | At a question | At the passphrase |
 |---|---|---|
 | `yes`, `y`, `ok`, `confirm` (any case, `!`/`.` allowed) | confirms | asked again (it's not the passphrase) |
 | `continue` / `1`, `discard` / `2` | picks that option (`/resume`) | asked again |
 | `cancel`, `no`, `stop`, `abort`, or `/cancel` | cancels, nothing changes | cancels, nothing changes |
 | the passphrase | deleted, and you're asked to answer the question first | **runs the change** |
+| something too short to be the passphrase (under 8 characters) | (depends on the question) | asked again |
 | anything else | asked again; after 3 unexpected answers the command is dropped | **wrong passphrase**: not run, and the command ends |
 | nothing for 2 minutes | dropped, nothing changes | dropped, nothing changes |
 
@@ -136,6 +142,80 @@ The passphrase is a second factor on top of the allowlist. It protects against s
 hold of an allowed person's unlocked phone or Telegram session, or is added to the group. Use one
 you don't use anywhere else, and change it (and restart) if it's ever exposed.
 
+## The audit trail (`/audit`)
+
+`/audit` shows what happened, newest first, grouped by day, about 8 events to a page so it reads
+well on a phone. Reply to move around:
+
+| Reply | Shows |
+|---|---|
+| `more` (or `next`) / `back` | older / newer page |
+| a number, e.g. `3` | that page |
+| `problems` | failures and recoveries only (like `npm run audit -- --recovery`) |
+| `watering` | watering sequences and cycles |
+| `commands` | Telegram commands, pauses and setting changes |
+| `summary` | outages, each watering and its outcome, crashes (like `--summary`) |
+| `all` | everything again |
+| a period: `90m`, `48h`, `7d`, `2w` | that far back (up to 90 days; the default is 24 h) |
+| `done` (or `cancel`) | closes it |
+
+You can combine a view and a period, and start with them: `/audit problems 7d`. `/audit` only reads. It
+doesn't need the passphrase, and it never holds anyone up: if someone else sends a command meanwhile,
+your `/audit` closes. With no reply for 2 minutes it just ends quietly.
+
+It reads at most the last 2 MB of the audit file (it grows forever), which is usually weeks of events.
+If the period you ask for goes further back than that, the page says so. `npm run audit` on the machine
+shows everything.
+
+## Changing settings (`/config`)
+
+`/config` changes these settings of one zone:
+
+| Setting | Meaning | Allowed |
+|---|---|---|
+| `thresholdPct` | Water when the soil reads below this % | 0–100 |
+| `targetPct` | Refill level: watering never goes above it | 0–100, above the threshold |
+| `runMinutes` | Length of a run (when no forecast is used) | above 0, up to 240 |
+| `maxMinutesPerDay` | Most watering in any 24 hours | above 0, up to 1440 |
+| `cooldownMinutes` | Least time between two runs | 0–10080 |
+| `maxCycleMinutes` | Longest single run; longer ones are split into cycles | above 0, up to 240 |
+| `soakMinutes` | Pause between those cycles | 0–240 |
+
+```
+/config → which zone? (if there are several)
+        → the zone's settings, then each one in turn:
+            a new value   e.g. 28, 28%, 12, 12 min, 4h (= 240 min); one decimal at most
+            next          keep it
+            back          the previous one again
+            done          skip the rest
+        → what would change → 🔐 passphrase → saved
+```
+
+- **"cancel" works at every step**, and nothing is saved before the passphrase.
+- **The summary shows everything that would change.** That includes settings that follow from the
+  ones you entered. For example, with no `targetPct` set, the target is the threshold + 10, so raising
+  the threshold raises it too. The same goes for the critical alert limits. Changes that mean more
+  water are flagged 💧.
+- **Values that don't fit together** (e.g. a threshold above the target) are explained at the
+  summary, and `edit` takes you through the settings again with your new values kept.
+- **A value out of range** is refused with the allowed range, and asked again. After 3 unexpected
+  answers to the same question, `/config` is dropped.
+
+When you confirm, the conductor:
+
+1. reads `conductor.json` again and checks the zone's settings there are still the ones in use. If the
+   file was edited by hand since the conductor started, nothing is changed: restart the conductor
+   first, so an edit nobody has reviewed is never picked up along the way;
+2. writes the new values into that zone's entry (as overrides: `defaults` and other zones are untouched)
+   and checks the whole file exactly as at startup;
+3. keeps the previous file as `conductor.json.bak`, writes the new one with the same permissions, and
+   swaps it in atomically (a crash can't leave half a file);
+4. uses the new settings from the next poll. Watering already under way keeps the plan it started with.
+
+The change is in the audit trail (`config.changed`, with the old and new values; `/audit commands`).
+The file is rewritten as standard 2-space JSON, so hand formatting isn't kept; everything else in it
+is. The conductor needs write access to `conductor.json` and its folder.
+
 ## Security
 
 Commands make the conductor act on incoming messages, so they are off by default and locked down:
@@ -157,9 +237,14 @@ Commands make the conductor act on incoming messages, so they are off by default
   recorded per hour in total, so a flood can neither spam you nor fill the disk.
 - **No stale or replayed commands.** Messages older than 2 minutes are ignored, for example ones sent
   while the conductor was down. Each message is handled at most once.
-- **Changes need the passphrase.** `/pause` and `/resume` always end with the passphrase, may ask
-  to confirm first, drop out on no answer or too many unexpected answers, and lock after repeated wrong
-  passphrases (see [Pausing and resuming](#pausing-and-resuming)).
+- **Changes need the passphrase.** `/pause`, `/resume` and `/config` always end with the passphrase,
+  may ask to confirm first, drop out on no answer or too many unexpected answers, and lock after
+  repeated wrong passphrases (see [Pausing and resuming](#pausing-and-resuming)). An answer that can't
+  be the passphrase (an answer word, or shorter than 8 characters, like a value meant for the previous
+  question) is asked again instead of counting as a wrong passphrase.
+- **Settings are checked like the config file.** `/config` accepts only the seven settings above, as
+  plain numbers in their allowed ranges. The whole file is validated before anything is written, and
+  nothing is written if it was edited by hand since startup.
 - **Exact commands only.** Text must be exactly one of the commands above. Arguments are refused, not
   ignored, and `/command@OtherBot` is left to that bot. Anything the APIs return (device and sensor
   names, errors) is escaped before it is shown.
@@ -188,7 +273,10 @@ leaks, revoke it with @BotFather (`/revoke`) and update `.env`.
 | `Telegram commands are off until restart: … 401` | The token was revoked or is wrong. Fix `.env` and restart. |
 | In a group, the bot doesn't see commands | With privacy mode on (the default), bots in groups only receive messages starting with `/`, which is all the commands need. If still nothing, check that the bot is a member of the group. |
 | `⏳ … can run again in …` | The 30-second cooldown on cloud-API commands. |
-| `/pause` or `/resume` is "Unknown command" | No `TELEGRAM_COMMAND_PASSPHRASE` is set. |
+| `/pause`, `/resume` or `/config` is "Unknown command" | No `TELEGRAM_COMMAND_PASSPHRASE` is set. |
+| `/config`: "has changed since the conductor started" | `conductor.json` was edited by hand; restart the conductor to load it, then try again. |
+| `/config`: "could not save" | The conductor can't write `conductor.json` (or a temporary file next to it): check the permissions. |
+| `/audit`: "only its newest part was read" | The audit file is large; use `npm run audit` on the machine for older events. |
 | The right passphrase is "wrong" | Check the `.env` line is quoted: an unquoted `#` cuts the value short. |
 | In a group, answers are ignored | Answer using Telegram's *Reply* on the bot's question (the reply box opens by itself), and from the same account that sent the command. |
 | `🔒 Changes are locked …` | Too many wrong passphrases; wait, or restart the conductor to clear the lock. |

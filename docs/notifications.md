@@ -18,7 +18,7 @@ Notifications are off if neither variable is set, and always off in dry-run mode
 `npm run conductor:check`).
 
 The same bot can also answer commands from this chat: read-only ones (`/status`, `/sensors_read`,
-`/bhyve_devices`), and `/pause` / `/resume` with a passphrase; see [telegram-commands.md](telegram-commands.md).
+`/bhyve_devices`, `/audit`), and `/pause`, `/resume` and `/config` with a passphrase; see [telegram-commands.md](telegram-commands.md).
 
 ## What you get
 

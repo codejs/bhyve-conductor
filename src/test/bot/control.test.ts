@@ -48,7 +48,7 @@ const setup = (s: ConductorStatus = status()) => {
   return { control, pause, resume };
 };
 
-const begin = async (c: MutableCommand) => c.begin(OWNER);
+const begin = async (c: MutableCommand) => c.begin(OWNER, '');
 const choose = async (step: Step, word: string): Promise<Step> => {
   if (step.kind !== 'ask') throw new Error(`expected a question, got ${step.kind}`);
   const choice = step.choices.find((c: Choice) => c.words.includes(word));
@@ -57,7 +57,8 @@ const choose = async (step: Step, word: string): Promise<Step> => {
 };
 const run = async (step: Step): Promise<string> => {
   if (step.kind !== 'passphrase') throw new Error(`expected the passphrase step, got ${step.kind}`);
-  return step.run();
+  const result = await step.run();
+  return typeof result === 'string' ? result : result.text;
 };
 
 describe('control commands', () => {
@@ -88,7 +89,7 @@ describe('control commands', () => {
 
     it('names the user by id when they have no username', async () => {
       const t = setup();
-      await run(await t.pause.begin({ id: 77 }));
+      await run(await t.pause.begin({ id: 77 }, ''));
       expect(t.control.pause).toHaveBeenCalledWith('user 77 via Telegram');
     });
 

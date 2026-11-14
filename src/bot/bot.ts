@@ -16,10 +16,11 @@ import type { BotCommand } from './commands.ts';
 import {
   ANSWER_WORDS,
   CANCEL_WORDS,
+  MIN_PASSPHRASE_LENGTH,
   normalizeAnswer,
   Passphrase,
   type Actor,
-  type MutableCommand,
+  type ConversationCommand,
   type Step,
 } from './conversation.ts';
 import { clip, duration, safe } from './format.ts';
@@ -121,7 +122,7 @@ export const DEFAULT_BOT_OPTIONS: CommandBotOptions = {
 export interface CommandBotDeps {
   api: BotApi;
   policy: CommandPolicy;
-  commands: readonly (BotCommand | MutableCommand)[];
+  commands: readonly (BotCommand | ConversationCommand)[];
   /** Required if any command is mutable (changes something). */
   passphrase?: string | undefined;
   /** Sends a reply (Telegram HTML) to the configured chat. Must not throw or block (e.g. DeliveryQueue.enqueue). */
@@ -205,7 +206,7 @@ type ConversationOutcome =
   | 'stopped';
 
 interface Conversation {
-  command: MutableCommand;
+  command: ConversationCommand;
   user: TelegramUser;
   startedMs: number;
   /** The step waiting for an answer (unset until the first one is asked). */
@@ -223,7 +224,8 @@ export class CommandBot {
   readonly #clock: Clock;
   readonly #audit: AuditSink;
   readonly #commands: ReadonlyMap<string, BotCommand>;
-  readonly #mutable: ReadonlyMap<string, MutableCommand>;
+  /** Commands that are conversations (mutable or interactive). */
+  readonly #conversational: ReadonlyMap<string, ConversationCommand>;
   readonly #passphrase: Passphrase | undefined;
   readonly #limiter: SlidingWindowLimiter;
   readonly #lastRun = new Map<string, number>();
@@ -251,17 +253,18 @@ export class CommandBot {
     this.#clock = deps.clock ?? systemClock;
     this.#audit = deps.audit ?? noAudit;
     const readOnly = new Map<string, BotCommand>();
-    const mutable = new Map<string, MutableCommand>();
+    const conversational = new Map<string, ConversationCommand>();
     for (const c of deps.commands) {
-      if (BUILT_IN.has(c.name) || readOnly.has(c.name) || mutable.has(c.name)) throw new Error(`duplicate bot command /${c.name}`);
-      if (isMutable(c)) mutable.set(c.name, c);
+      if (BUILT_IN.has(c.name) || readOnly.has(c.name) || conversational.has(c.name)) throw new Error(`duplicate bot command /${c.name}`);
+      if (isConversation(c)) conversational.set(c.name, c);
       else readOnly.set(c.name, c);
     }
     this.#commands = readOnly;
-    this.#mutable = mutable;
-    if (mutable.size > 0 && deps.passphrase === undefined) {
+    this.#conversational = conversational;
+    const mutable = [...conversational.values()].filter((c) => c.kind === 'mutable');
+    if (mutable.length > 0 && deps.passphrase === undefined) {
       // Fail closed: a command that changes something must never run without the passphrase check.
-      throw new Error(`/${[...mutable.keys()].join(', /')} need a passphrase (TELEGRAM_COMMAND_PASSPHRASE)`);
+      throw new Error(`/${mutable.map((c) => c.name).join(', /')} need a passphrase (TELEGRAM_COMMAND_PASSPHRASE)`);
     }
     this.#passphrase = deps.passphrase === undefined ? undefined : new Passphrase(deps.passphrase);
     this.#limiter = new SlidingWindowLimiter(this.#opts.maxCommandsPerWindow, this.#opts.rateWindowMs);
@@ -364,8 +367,8 @@ export class CommandBot {
     log.info(`Telegram commands on${me.username ? ` for @${me.username}` : ''} (chat ${this.#deps.policy.chatId})`);
     const menu = [
       { command: 'help', description: 'List the commands' },
-      ...[...this.#commands.values(), ...this.#mutable.values()].map((c) => ({ command: c.name, description: c.description })),
-      ...(this.#mutable.size > 0 ? [{ command: 'cancel', description: 'Cancel a pending change' }] : []),
+      ...[...this.#commands.values(), ...this.#conversational.values()].map((c) => ({ command: c.name, description: c.description })),
+      ...(this.#conversational.size > 0 ? [{ command: 'cancel', description: 'Cancel a pending change' }] : []),
     ];
     try {
       await this.#deps.api.setMyCommands(menu, this.#deps.policy.chatId);
@@ -425,7 +428,7 @@ export class CommandBot {
       return;
     }
 
-    const known = parsed && (this.#commands.has(parsed.name) || this.#mutable.has(parsed.name) || BUILT_IN.has(parsed.name));
+    const known = parsed && (this.#commands.has(parsed.name) || this.#conversational.has(parsed.name) || BUILT_IN.has(parsed.name));
     if (!parsed || !known) {
       this.#deps.reply(`🤷 Unknown command${parsed ? ` /${safe(parsed.name, 32)}` : ''}. Send /help for the list.`);
       return;
@@ -434,18 +437,22 @@ export class CommandBot {
       this.#deps.reply(this.#help());
       return;
     }
-    if (parsed.args !== '') {
-      const note = leak ? ` ${leak} Send the command alone; I ask for the passphrase when it's needed.` : '';
-      this.#deps.reply(`⚠️ /${parsed.name} takes no arguments.${note}`);
+    const conversational = this.#conversational.get(parsed.name);
+    if (leak) {
+      // Never act on it: arguments could be echoed back (e.g. "can't read …"), and it can't be a valid one anyway.
+      this.#deps.reply(`⚠️ /${parsed.name} was not run. ${leak} Send the command alone; I ask for the passphrase when it's needed.`);
+      return;
+    }
+    if (parsed.args !== '' && !conversational?.acceptsArgs) {
+      this.#deps.reply(`⚠️ /${parsed.name} takes no arguments.`);
       return;
     }
     if (parsed.name === 'cancel') {
       await this.#cancelCommand(user);
       return;
     }
-    const mutable = this.#mutable.get(parsed.name);
-    if (mutable) {
-      await this.#startConversation(mutable, message, user);
+    if (conversational) {
+      await this.#startConversation(conversational, message, user, parsed.args);
       return;
     }
     const command = this.#commands.get(parsed.name);
@@ -523,10 +530,10 @@ export class CommandBot {
 
   // ---------- commands that change something ----------
 
-  async #startConversation(command: MutableCommand, message: TelegramMessage, user: TelegramUser): Promise<void> {
+  async #startConversation(command: ConversationCommand, message: TelegramMessage, user: TelegramUser, args: string): Promise<void> {
     const nowMs = this.#clock.now().getTime();
     log.info(`Telegram commands: /${command.name} from user ${user.id}`);
-    if (this.#lockedUntil > nowMs) {
+    if (command.kind === 'mutable' && this.#lockedUntil > nowMs) {
       await this.#say(
         `🔒 Changes are locked for another ${duration(this.#lockedUntil - nowMs)} after too many wrong passphrases. /${command.name} was not run.`,
       );
@@ -535,17 +542,25 @@ export class CommandBot {
     }
     const current = this.#conversation;
     if (current) {
-      if (current.user.id !== user.id) {
+      const other = current.user.id !== user.id;
+      if (other && current.command.kind === 'mutable') {
+        // Someone else's change in progress is never interfered with.
         await this.#say(`⏳ ${safe(actorOf(current.user).label)} is answering /${current.command.name}. Try again when that's done.`);
         return;
       }
       this.#end(current, 'superseded');
-      await this.#say(`✋ The pending /${current.command.name} was cancelled.`);
+      if (other) {
+        // Read-only browsing gives way (it must never hold up e.g. a /pause).
+        await this.#say(`👋 ${safe(actorOf(current.user).label)}'s /${current.command.name} was closed for /${command.name}.`);
+      } else if (current.command.kind === 'mutable') {
+        await this.#say(`✋ The pending /${current.command.name} was cancelled.`);
+      }
     }
 
     const conversation: Conversation = { command, user, startedMs: nowMs, invalid: 0 };
     this.#conversation = conversation;
-    const step = await this.#guard(() => command.begin(actorOf(user)));
+    const actor: Actor = { id: user.id, ...(user.username ? { username: user.username } : {}) };
+    const step = await this.#guard(() => command.begin(actor, args));
     if (this.#conversation !== conversation) return; // stopped meanwhile
     if (!step.ok) {
       this.#end(conversation, step.outcome, step.error);
@@ -558,8 +573,15 @@ export class CommandBot {
   /** Moves to the next step: asks its question, or ends the conversation if there's nothing to do. */
   async #advance(conversation: Conversation, step: Step, replyTo: TelegramMessage): Promise<void> {
     if (step.kind === 'done') {
-      this.#end(conversation, 'nothing-to-do');
+      this.#end(conversation, conversation.command.kind === 'mutable' ? 'nothing-to-do' : 'ok');
       await this.#say(step.text);
+      return;
+    }
+    if (step.kind === 'passphrase' && conversation.command.kind !== 'mutable') {
+      // Fail closed: only a command registered as mutable may run anything behind the passphrase.
+      log.error(`Telegram commands: read-only /${conversation.command.name} asked for the passphrase; refused`);
+      this.#end(conversation, 'failed', 'a read-only command asked for the passphrase');
+      await this.#say(`❌ /${conversation.command.name} failed (internal error). Nothing changed.`);
       return;
     }
     conversation.step = step;
@@ -569,7 +591,8 @@ export class CommandBot {
 
   /** Sends a question (as a reply that opens the answer box) and starts waiting for the answer. */
   async #ask(conversation: Conversation, html: string, replyTo: TelegramMessage): Promise<void> {
-    const placeholder = conversation.step?.kind === 'passphrase' ? 'passphrase or cancel' : 'your answer';
+    const step = conversation.step;
+    const placeholder = step?.kind === 'passphrase' ? 'passphrase or cancel' : step?.kind === 'input' && step.placeholder ? step.placeholder : 'your answer';
     await this.#say(html, { replyToMessageId: replyTo.message_id, forceReply: true, placeholder });
     if (this.#conversation !== conversation) return;
     this.#clock.clearTimeout(conversation.timer);
@@ -581,7 +604,10 @@ export class CommandBot {
     const name = conversation.command.name;
     this.#end(conversation, 'expired');
     this.#lastExpired = { userId: conversation.user.id, command: name, atMs: this.#clock.now().getTime() };
-    void this.#say(`⌛ No answer within ${duration(this.#opts.conversationTimeoutMs)}: /${name} cancelled. Nothing changed.`);
+    // Browsing just ends quietly; a change that was being confirmed must say it didn't happen.
+    if (conversation.command.kind === 'mutable') {
+      void this.#say(`⌛ No answer within ${duration(this.#opts.conversationTimeoutMs)}: /${name} cancelled. Nothing changed.`);
+    }
   }
 
   /** A text message from an allowed user: an answer if they're in a conversation, otherwise ignored. */
@@ -611,19 +637,26 @@ export class CommandBot {
     this.#clock.clearTimeout(conversation.timer);
     const name = conversation.command.name;
     const word = normalizeAnswer(text);
+    if (CANCEL_WORDS.has(word)) {
+      this.#end(conversation, 'cancelled');
+      await this.#say(this.#cancelledText(conversation));
+      return;
+    }
 
     if (step.kind === 'passphrase') {
-      // Any answer here may be (close to) the passphrase: delete it before anything else.
-      const isAnswerWord = ANSWER_WORDS.has(word) && !this.#passphrase?.matches(text);
-      if (CANCEL_WORDS.has(word)) {
-        this.#end(conversation, 'cancelled');
-        await this.#say(`✋ /${name} cancelled. Nothing changed.`);
-        return;
+      // Not an attempt at all: an answer word, or too short to be the passphrase (e.g. a number meant
+      // for the previous question). Asked again rather than counted as a wrong passphrase.
+      if (!this.#passphrase?.matches(text)) {
+        if (ANSWER_WORDS.has(word)) {
+          await this.#unexpected(conversation, message, '🔐 That was an answer word, not the passphrase.');
+          return;
+        }
+        if (text.trim().length < MIN_PASSPHRASE_LENGTH) {
+          await this.#unexpected(conversation, message, "🔐 That's too short to be the passphrase.");
+          return;
+        }
       }
-      if (isAnswerWord) {
-        await this.#unexpected(conversation, message, '🔐 That was an answer word, not the passphrase.');
-        return;
-      }
+      // Any answer from here on may be (close to) the passphrase: delete it before anything else.
       const note = (await this.#deleteMessage(message)) ? '' : ANSWER_NOT_DELETED;
       if (this.#conversation !== conversation) return;
       if (!this.#passphrase?.matches(text)) {
@@ -634,8 +667,10 @@ export class CommandBot {
       const result = await this.#guard(() => step.run());
       if (this.#conversation !== conversation) return;
       if (result.ok) {
-        this.#end(conversation, 'ok');
-        await this.#say(`${result.value}${note ? `\n\n${note}` : ''}`);
+        const reply = typeof result.value === 'string' ? { text: result.value } : result.value;
+        if ('error' in reply) log.warn(`Telegram commands: /${name} did not go through: ${reply.error}`);
+        this.#end(conversation, 'error' in reply ? 'failed' : 'ok', 'error' in reply ? reply.error : undefined);
+        await this.#say(`${reply.text}${note ? `\n\n${note}` : ''}`);
       } else {
         this.#end(conversation, result.outcome, result.error);
         if (result.outcome !== 'stopped') {
@@ -646,16 +681,27 @@ export class CommandBot {
       return;
     }
 
-    // A question with choices.
-    if (CANCEL_WORDS.has(word)) {
-      this.#end(conversation, 'cancelled');
-      await this.#say(`✋ /${name} cancelled. Nothing changed.`);
-      return;
-    }
     if (leak) {
       await this.#unexpected(conversation, message, `${leak} Answer this question first; I ask for the passphrase after it.`);
       return;
     }
+    if (step.kind === 'input') {
+      const result = await this.#guard(() => step.read(text));
+      if (this.#conversation !== conversation) return;
+      if (!result.ok) {
+        this.#end(conversation, result.outcome, result.error);
+        if (result.outcome !== 'stopped') await this.#say(`❌ /${name} failed: ${safe(result.error, 300)}. Nothing changed.`);
+        return;
+      }
+      if ('invalid' in result.value) {
+        await this.#unexpected(conversation, message, `⚠️ ${safe(result.value.invalid, 300)}`);
+        return;
+      }
+      await this.#advance(conversation, result.value.next, message);
+      return;
+    }
+
+    // A question with choices.
     const choice = step.choices.find((c) => c.words.includes(word));
     if (!choice) {
       await this.#unexpected(conversation, message);
@@ -679,7 +725,8 @@ export class CommandBot {
     conversation.invalid++;
     if (conversation.invalid >= this.#opts.maxInvalidAnswers) {
       this.#end(conversation, 'aborted');
-      await this.#say(`🤷 Too many unexpected answers: /${conversation.command.name} cancelled. Nothing changed.`);
+      const ending = conversation.command.kind === 'mutable' ? 'cancelled. Nothing changed.' : 'closed.';
+      await this.#say(`🤷 Too many unexpected answers: /${conversation.command.name} ${ending}`);
       return;
     }
     const hint = step.kind === 'passphrase' ? 'Send the passphrase, or <b>cancel</b>.' : safe(step.hint);
@@ -724,7 +771,13 @@ export class CommandBot {
       return;
     }
     this.#end(conversation, 'cancelled');
-    await this.#say(`✋ /${conversation.command.name} cancelled. Nothing changed.`);
+    await this.#say(this.#cancelledText(conversation));
+  }
+
+  #cancelledText(conversation: Conversation): string {
+    return conversation.command.kind === 'mutable'
+      ? `✋ /${conversation.command.name} cancelled. Nothing changed.`
+      : `👋 /${conversation.command.name} closed.`;
   }
 
   /** Ends a conversation and records how. */
@@ -734,7 +787,7 @@ export class CommandBot {
     this.#recordConversation(conversation.command, conversation.user, conversation.startedMs, outcome, conversation.choice, error);
   }
 
-  #recordConversation(command: MutableCommand, user: TelegramUser, startedMs: number, outcome: ConversationOutcome, choice?: string, error?: string): void {
+  #recordConversation(command: ConversationCommand, user: TelegramUser, startedMs: number, outcome: ConversationOutcome, choice?: string, error?: string): void {
     this.#audit.record('command.handled', {
       command: command.name,
       user: user.id,
@@ -768,18 +821,26 @@ export class CommandBot {
   }
 
   #help(): string {
-    const line = (c: BotCommand | MutableCommand) =>
+    const line = (c: BotCommand | ConversationCommand) =>
       `/${c.name}: ${safe(c.description)}${'script' in c && c.script ? ` <i>(like npm run ${safe(c.script, 40)})</i>` : ''}`;
-    if (this.#mutable.size === 0) {
-      return ['🌱 <b>Lawn conductor commands</b> (read-only)', ...[...this.#commands.values()].map(line), '/help: this list'].join('\n');
+    const all = [...this.#conversational.values()];
+    const readOnly = [...this.#commands.values(), ...all.filter((c) => c.kind === 'interactive')];
+    const mutable = all.filter((c) => c.kind === 'mutable');
+    if (mutable.length === 0) {
+      return [
+        '🌱 <b>Lawn conductor commands</b> (read-only)',
+        ...readOnly.map(line),
+        '/help: this list',
+        ...(all.length > 0 ? ['/cancel: close what is waiting for your answer'] : []),
+      ].join('\n');
     }
     return [
       '🌱 <b>Lawn conductor commands</b>',
-      ...[...this.#commands.values()].map(line),
+      ...readOnly.map(line),
       '/help: this list',
       '',
       '<b>Changes</b> (each asks for the passphrase):',
-      ...[...this.#mutable.values()].map(line),
+      ...mutable.map(line),
       '/cancel: cancel a pending change',
     ].join('\n');
   }
@@ -828,7 +889,8 @@ export class CommandBot {
   }
 }
 
-const isMutable = (c: BotCommand | MutableCommand): c is MutableCommand => 'kind' in c && c.kind === 'mutable';
+const isConversation = (c: BotCommand | ConversationCommand): c is ConversationCommand =>
+  'kind' in c && (c.kind === 'mutable' || c.kind === 'interactive');
 
 const actorOf = (user: TelegramUser): Actor & { label: string } => ({
   id: user.id,

@@ -66,6 +66,8 @@ export type AuditType =
   | 'conductor.resumed'
   /** The conductor started while paused (the pause survives restarts). */
   | 'conductor.still_paused'
+  /** A zone's watering settings were changed while running (e.g. /config in Telegram); saved to conductor.json. */
+  | 'config.changed'
   /** A zone's decision changed (e.g. moist → dry → waiting for rain). Only changes are recorded. */
   | 'zone.decision'
   /** Marks what a simulation did (fault injected, time of day...); only in simulated trails. */
@@ -169,6 +171,40 @@ export const parseAudit = (text: string): { events: AuditEvent[]; skipped: numbe
     }
   }
   return { events, skipped };
+};
+
+/**
+ * Reads at most the last `maxBytes` of an audit file (it grows forever; a chat command must not load all
+ * of it). `truncated` says older events exist that weren't read.
+ */
+export const readAuditTail = async (
+  path: string,
+  maxBytes: number,
+): Promise<{ events: AuditEvent[]; skipped: number; truncated: boolean }> => {
+  let handle;
+  try {
+    handle = await open(path, 'r');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], skipped: 0, truncated: false };
+    throw err;
+  }
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buf, 0, length, size - length);
+    let start = 0;
+    if (size > length) {
+      // Started mid-file: drop the (partial) first line. Cutting at a newline byte also never splits a
+      // multi-byte character.
+      const newline = buf.indexOf(0x0a);
+      start = newline < 0 ? bytesRead : newline + 1;
+    }
+    const { events, skipped } = parseAudit(buf.subarray(start, bytesRead).toString('utf8'));
+    return { events, skipped, truncated: size > length };
+  } finally {
+    await handle.close();
+  }
 };
 
 /** The last complete event in the file, reading only its tail (the file grows forever). */

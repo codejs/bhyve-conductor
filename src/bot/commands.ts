@@ -6,9 +6,9 @@ import { formatDevices, formatReadings, formatStatus } from './format.ts';
 /**
  * The read-only commands the Telegram bot answers: nothing here can start or stop watering or change
  * a controller. That is enforced by the types below (the B-hyve client is narrowed to `getDevices`),
- * not just by convention. Commands that change something (/pause, /resume) live in control.ts and
- * always go through a conversation ending in the passphrase (conversation.ts, bot.ts); they still
- * never talk to B-hyve directly.
+ * not just by convention. /audit (audit-command.ts) is read-only too, over several messages. Commands
+ * that change something (/pause, /resume in control.ts; /config in config-command.ts) always go through
+ * a conversation ending in the passphrase (conversation.ts, bot.ts); none of them talks to B-hyve.
  */
 
 export interface BotCommand {
