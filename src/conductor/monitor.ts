@@ -13,6 +13,7 @@ import type { WateringHistory } from './history.ts';
 import { applyDeviceState, applyForecast, evaluateZone, type DeviceCommand, type ZoneDecision } from './plan.ts';
 import { Sequencer } from './sequencer.ts';
 import type { ConductorState, PendingSequence } from './state.ts';
+import type { ServiceName } from '../audit/health.ts';
 
 /** The parts of BhyveClient the monitor needs (lets tests pass a fake). */
 export type BhyveControl = Pick<BhyveClient, 'getDevices' | 'getDevice' | 'getPrograms' | 'startWatering' | 'onEvent'>;
@@ -48,6 +49,34 @@ export interface CycleResult {
   sent: DeviceCommand[];
   /** Commands whose first wave couldn't be delivered now (they may still be retrying). */
   failed: { command: DeviceCommand; error: unknown }[];
+}
+
+/** A read-only snapshot of what the conductor is doing, for status reports (e.g. the Telegram /status command). */
+export interface ConductorStatus {
+  /** When the snapshot was taken. */
+  at: Date;
+  /** Polling (start() called and not stopped). */
+  running: boolean;
+  dryRun: boolean;
+  pollIntervalMinutes: number;
+  /** When start() was called. */
+  startedAt?: Date;
+  /** A poll is in progress right now. */
+  polling: boolean;
+  lastPoll?: { startedAt: Date; finishedAt: Date; ok: boolean; error?: string };
+  nextPollAt?: Date;
+  /** Every configured zone, with the decision from the last poll that got that far (if any). */
+  zones: {
+    key: string;
+    name: string;
+    decision?: { at: Date; action: ZoneDecision['action']; reason: string; detail: string; moisturePct?: number; runMinutes?: number };
+  }[];
+  /** Watering sequences in progress (including ones waiting out a soak or a retry). */
+  sequences: { id: string; deviceId: string; zoneNames: string[]; nextCycle: number; cycles: number; dueAt: Date; attempts: number }[];
+  /** Remote services currently unreachable. */
+  outages: { service: ServiceName; since: Date; failures: number; lastError: string }[];
+  /** Open alert conditions (low battery, critical moisture, controller offline...). */
+  alerts: { key: string; state: string; since: Date }[];
 }
 
 const MINUTE_MS = 60_000;
@@ -89,6 +118,12 @@ export class Monitor {
   readonly #noDataSince = new Map<string, Date>();
   /** Last decision reason per zone, to audit changes only. */
   readonly #lastReason = new Map<string, string>();
+  /** For status(): the last decision per zone and the poll timeline. */
+  readonly #lastDecision = new Map<string, { at: Date; decision: ZoneDecision }>();
+  #startedAt: Date | undefined;
+  #pollStartedAt: Date | undefined;
+  #lastPoll: ConductorStatus['lastPoll'];
+  #nextPollAt: Date | undefined;
 
   constructor(deps: MonitorDeps) {
     this.#deps = deps;
@@ -166,6 +201,7 @@ export class Monitor {
       ({ decisions, commands } = applyDeviceState(decisions, devices));
     }
     decisions.forEach(logDecision);
+    for (const d of decisions) this.#lastDecision.set(d.zone.key, { at: now, decision: d });
     this.#auditDecisionChanges(decisions);
     if (alertsChanged) await this.#persist();
 
@@ -343,10 +379,56 @@ export class Monitor {
     return this.#saveQueue;
   }
 
+  /** A snapshot of the conductor's state. Never touches the network, so it's cheap and can't fail. */
+  status(): ConductorStatus {
+    const { config } = this.#deps;
+    const at = this.#now();
+    const running = this.#running;
+    return {
+      at,
+      running,
+      dryRun: config.dryRun,
+      pollIntervalMinutes: config.pollIntervalMinutes,
+      ...(this.#startedAt ? { startedAt: this.#startedAt } : {}),
+      polling: this.#pollStartedAt !== undefined,
+      ...(this.#lastPoll ? { lastPoll: { ...this.#lastPoll } } : {}),
+      ...(running && this.#nextPollAt ? { nextPollAt: this.#nextPollAt } : {}),
+      zones: config.zones.map((zone) => {
+        const last = this.#lastDecision.get(zone.key);
+        if (!last) return { key: zone.key, name: zone.name };
+        const d = last.decision;
+        return {
+          key: zone.key,
+          name: zone.name,
+          decision: {
+            at: last.at,
+            action: d.action,
+            reason: d.reason,
+            detail: d.detail,
+            ...(d.reading ? { moisturePct: Math.round(d.reading.moisturePct * 10) / 10 } : {}),
+            ...(d.action === 'water' && d.runMinutes !== undefined ? { runMinutes: d.runMinutes } : {}),
+          },
+        };
+      }),
+      sequences: this.#sequencer.pending().map((seq) => ({
+        id: seq.id,
+        deviceId: seq.deviceId,
+        zoneNames: [...(seq.zoneNames ?? [])],
+        nextCycle: seq.nextWave + 1,
+        cycles: seq.waves.length,
+        dueAt: new Date(seq.dueAt),
+        attempts: seq.attempts,
+      })),
+      outages: this.#health.outages(),
+      alerts: Object.entries(this.#alerts.state).map(([key, v]) => ({ key, state: v.state, since: new Date(v.since) })),
+    };
+  }
+
   /** Polls now and then every `pollIntervalMinutes` (measured from the end of each cycle, so cycles never overlap). */
   start(): void {
     if (this.#running) return;
     this.#running = true;
+    this.#startedAt = this.#now();
     log.info(
       `Monitoring ${this.#deps.config.zones.length} zone(s) every ${this.#deps.config.pollIntervalMinutes} min` +
         (this.#deps.config.dryRun ? ' (dry run: no commands will be sent)' : ''),
@@ -365,16 +447,26 @@ export class Monitor {
         POLL_DEADLINE_MS,
       );
     });
+    const pollStartedAt = this.#now();
+    this.#pollStartedAt = pollStartedAt;
+    this.#nextPollAt = undefined;
     this.#inFlight = Promise.race([this.runCycle(), deadline])
+      .then(() => {
+        this.#lastPoll = { startedAt: pollStartedAt, finishedAt: this.#now(), ok: true };
+      })
       .catch((err: unknown) => {
         log.error('Monitoring cycle failed; will retry next poll', err);
         this.#audit.record('poll.failed', { error: errorMessage(err) });
+        this.#lastPoll = { startedAt: pollStartedAt, finishedAt: this.#now(), ok: false, error: errorMessage(err) };
       })
       .finally(() => {
         this.#clock.clearTimeout(watchdog);
         this.#inFlight = undefined;
+        this.#pollStartedAt = undefined;
         if (this.#running) {
-          this.#timer = this.#clock.setTimeout(() => this.#tick(), this.#deps.config.pollIntervalMinutes * MINUTE_MS);
+          const delayMs = this.#deps.config.pollIntervalMinutes * MINUTE_MS;
+          this.#nextPollAt = new Date(this.#now().getTime() + delayMs);
+          this.#timer = this.#clock.setTimeout(() => this.#tick(), delayMs);
         }
       });
   }
@@ -384,6 +476,7 @@ export class Monitor {
     this.#running = false;
     this.#clock.clearTimeout(this.#timer);
     this.#timer = undefined;
+    this.#nextPollAt = undefined;
     this.#sequencer.stop();
     await this.#inFlight;
     await this.#saveQueue;

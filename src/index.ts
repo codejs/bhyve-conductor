@@ -6,10 +6,15 @@
  *   npm run dev -- --dry-run    log decisions without sending commands
  *   npm run conductor:check     one dry-run cycle, then exit (good for checking the config)
  *   npm run audit               review what happened (watering, outages, recoveries)
+ * With TELEGRAM_COMMANDS=on, the Telegram chat can also ask for /status, /sensors_read and
+ * /bhyve_devices (read-only; see docs/telegram-commands.md).
  */
 import { parseArgs } from 'node:util';
 import { FileAuditLog, lastAuditEvent, teeAudit, type AuditSink } from './audit/audit.ts';
 import { BhyveClient } from './bhyve/client.ts';
+import { commandPolicy } from './bot/auth.ts';
+import { CommandBot } from './bot/bot.ts';
+import { buildCommands, zonesBySensor } from './bot/commands.ts';
 import { assertForecastReady, loadConductorConfig } from './conductor/config.ts';
 import { Monitor } from './conductor/monitor.ts';
 import { FileStateStore } from './conductor/state.ts';
@@ -45,6 +50,8 @@ const main = async (): Promise<void> => {
     'LOCATION',
     'TELEGRAM_BOT_TOKEN',
     'TELEGRAM_CHAT_ID',
+    'TELEGRAM_COMMANDS',
+    'TELEGRAM_COMMAND_USER_IDS',
   ]);
   const config = await loadConductorConfig(env.CONDUCTOR_CONFIG);
   if (args['dry-run']) config.dryRun = true;
@@ -53,14 +60,25 @@ const main = async (): Promise<void> => {
   let audit: AuditSink = auditFile;
   let notifier: Notifier | undefined;
   let queue: DeliveryQueue | undefined;
+  let telegram: TelegramClient | undefined;
   if (Boolean(env.TELEGRAM_BOT_TOKEN) !== Boolean(env.TELEGRAM_CHAT_ID)) {
     throw new Error('Set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for notifications (or neither)');
   }
+  // Validated even when it won't be used (dry run, --once), so a misconfiguration shows up straight away.
+  const policy = commandPolicy({
+    enabled: env.TELEGRAM_COMMANDS,
+    token: env.TELEGRAM_BOT_TOKEN,
+    chatId: env.TELEGRAM_CHAT_ID,
+    userIds: env.TELEGRAM_COMMAND_USER_IDS,
+  });
+  if (!policy && env.TELEGRAM_COMMAND_USER_IDS.length > 0) {
+    log.warn('TELEGRAM_COMMAND_USER_IDS is set but TELEGRAM_COMMANDS is off: Telegram commands are disabled');
+  }
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     if (config.dryRun) {
-      log.info('Dry run: Telegram notifications are off');
+      log.info(`Dry run: Telegram notifications${policy ? ' and commands' : ''} are off`);
     } else {
-      const telegram = new TelegramClient({ token: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID });
+      telegram = new TelegramClient({ token: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID });
       // Delivery failures go to the audit file only (not back through the notifier).
       queue = new DeliveryQueue(telegram, {}, (drop) =>
         auditFile.record('notification.failed', { error: drop.error, attempts: drop.attempts, message: drop.text.slice(0, 200) }),
@@ -115,7 +133,28 @@ const main = async (): Promise<void> => {
     ...(weather ? { weather } : {}),
   });
 
+  // Telegram commands: only for the long-running service (a dry run or --once must not take the
+  // updates away from it), and only where replies can be delivered.
+  let bot: CommandBot | undefined;
+  if (policy && telegram && queue && !args.once) {
+    const q = queue;
+    const commands = buildCommands({
+      // Only the read-only call is handed over, so no chat message can ever reach a watering command.
+      bhyve: { getDevices: () => bhyve.getDevices() },
+      // Its own source, so a command's read can't interfere with the monitor's (same Tuya client and token).
+      sensors: new TuyaSoilSource(tuya, { sensorIds: [...new Set(config.zones.flatMap((z) => z.sensorIds))], moistureCode: env.TUYA_MOISTURE_CODE }),
+      zonesBySensor: zonesBySensor(config.zones),
+      status: () => monitor.status(),
+      timeZone: config.notifications.timeZone,
+    });
+    bot = new CommandBot({ api: telegram, policy, commands, reply: (html) => q.enqueue(html), audit });
+  } else if (policy && args.once) {
+    log.info('Telegram commands are only answered by the continuously running service (not with --once)');
+  }
+
   const finish = async (reason: string): Promise<void> => {
+    // Stop taking commands before anything else shuts down.
+    await bot?.stop();
     await monitor.stop();
     bhyve.close();
     audit.record('service.stopped', { reason });
@@ -152,6 +191,7 @@ const main = async (): Promise<void> => {
   }
 
   monitor.start();
+  bot?.start();
 };
 
 main().catch((err: unknown) => {

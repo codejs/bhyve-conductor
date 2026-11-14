@@ -47,6 +47,39 @@ const EnvSchema = z.object({
   TELEGRAM_BOT_TOKEN: blankAsUnset(z.string().regex(/^\d+:[\w-]{20,}$/, 'expected a bot token like 123456789:AA...').optional()),
   /** Numeric chat id (negative for groups) or @channelname. */
   TELEGRAM_CHAT_ID: blankAsUnset(z.string().regex(/^(-?\d+|@\w{4,})$/, 'expected a numeric chat id or @channelname').optional()),
+  /**
+   * Let the chat send read-only commands (/status, /sensors_read, /bhyve_devices) to the bot. Off unless
+   * explicitly turned on: it makes the conductor act on incoming messages (see docs/telegram-commands.md).
+   */
+  TELEGRAM_COMMANDS: blankAsUnset(
+    z
+      .enum(['on', 'off', 'true', 'false', '1', '0'], "expected 'on' or 'off'")
+      .default('off')
+      .transform((v) => v === 'on' || v === 'true' || v === '1'),
+  ),
+  /**
+   * Telegram user ids allowed to send commands. Required when TELEGRAM_CHAT_ID is a group; in a private
+   * chat the only possible sender is the chat's own user, so it's optional there.
+   */
+  TELEGRAM_COMMAND_USER_IDS: z
+    .string()
+    .default('')
+    .transform((s) =>
+      s
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean),
+    )
+    .pipe(
+      z.array(
+        z
+          .string()
+          .regex(/^[1-9]\d{0,15}$/, 'expected comma-separated numeric Telegram user ids')
+          .transform(Number)
+          // A rounded id would silently authorise somebody else.
+          .refine(Number.isSafeInteger, 'Telegram user id is out of range'),
+      ),
+    ),
 
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });

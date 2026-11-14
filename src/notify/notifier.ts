@@ -281,6 +281,20 @@ export class Notifier implements AuditSink {
           : undefined;
       case 'state.save_failed':
         return { severity: 'critical', text: `💾 <b>Can’t save state</b>: ${str(e.error)}\nCooldowns and pending cycles won’t survive a restart.` };
+
+      // ----- Telegram commands -----
+      case 'command.rejected': {
+        // Forwarded or inline-bot messages from the right people are only audited; strangers get reported.
+        if (e.notify !== true) return undefined;
+        const who = `user ${str(e.user)}${typeof e.userName === 'string' ? ` (@${escapeHtml(e.userName.slice(0, 64))})` : ''}`;
+        const what = typeof e.command === 'string' ? ` /${escapeHtml(e.command.slice(0, 32))}` : '';
+        return {
+          severity: 'warning',
+          text:
+            `🚫 <b>Ignored a bot command</b>${what} from ${who} in chat ${str(e.chat)} (${escapeHtml(String(e.reason))}).\n` +
+            'Nothing was run. If this wasn’t you, no action is needed; if it was, check TELEGRAM_COMMAND_USER_IDS.',
+        };
+      }
       default:
         return undefined;
     }

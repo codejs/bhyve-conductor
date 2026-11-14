@@ -53,4 +53,9 @@ export class ConnectionHealth {
   isDown(service: ServiceName): boolean {
     return this.#down.has(service);
   }
+
+  /** Services currently unreachable (a copy, for status reports). */
+  outages(): { service: ServiceName; since: Date; failures: number; lastError: string }[] {
+    return [...this.#down].map(([service, o]) => ({ service, since: new Date(o.since), failures: o.failures, lastError: o.lastError }));
+  }
 }

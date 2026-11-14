@@ -53,6 +53,10 @@ export type AuditType =
   | 'zone.daily_limit_reached'
   /** A notification could not be delivered (written to the audit file only). */
   | 'notification.failed'
+  /** An authorized Telegram command ran (read-only; see bot/bot.ts). */
+  | 'command.handled'
+  /** A Telegram command was ignored: wrong chat, user not allowed, forwarded... (throttled per sender). */
+  | 'command.rejected'
   /** A zone's decision changed (e.g. moist → dry → waiting for rain). Only changes are recorded. */
   | 'zone.decision'
   /** Marks what a simulation did (fault injected, time of day...); only in simulated trails. */

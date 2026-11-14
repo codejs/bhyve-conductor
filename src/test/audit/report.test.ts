@@ -114,6 +114,21 @@ describe('describe / formatEvent', () => {
     expect(describeEvent(resumed, 'America/Chicago')).toBe('watering resumed after restart dev1 [seq x] at cycle 3/3 (due 2026-07-01 06:56:00)');
   });
 
+  it('describes Telegram commands', () => {
+    expect(describeEvent(ev(NOW.toISOString(), 'command.handled', { command: 'status', user: 4242, outcome: 'ok', ms: 12 }))).toBe(
+      'telegram command /status from user 4242: ok in 12 ms',
+    );
+    expect(
+      describeEvent(ev(NOW.toISOString(), 'command.handled', { command: 'sensors_read', user: 4242, outcome: 'failed', ms: 40, error: 'HTTP 502' })),
+    ).toBe('telegram command /sensors_read from user 4242: failed in 40 ms (HTTP 502)');
+    expect(describeEvent(ev(NOW.toISOString(), 'command.rejected', { reason: 'other-chat', chat: 6666, user: 6666, command: 'status' }))).toBe(
+      'telegram command /status REJECTED (other-chat) from user 6666 in chat 6666',
+    );
+    expect(describeEvent(ev(NOW.toISOString(), 'command.rejected', { reason: 'anonymous', chat: -100 }))).toBe(
+      'telegram command REJECTED (anonymous) from user ? in chat -100',
+    );
+  });
+
   it('falls back to the raw fields for unknown event types', () => {
     expect(describeEvent({ ts: NOW.toISOString(), type: 'future.event' as AuditEvent['type'], x: 1 })).toBe('{"x":1}');
   });

@@ -1129,3 +1129,178 @@ describe('Monitor: decision audit', () => {
     expect(audit.ofType('zone.decision')[2]).toMatchObject({ action: 'water', moisturePct: 25, minutes: 10, detail: expect.stringContaining('below 30%') });
   });
 });
+
+describe('Monitor.status', () => {
+  const MINUTE_MS = 60_000;
+  const INTERVAL_MS = 15 * MINUTE_MS;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const twoZones = () => [zone({ name: 'Front', station: 1, sensorIds: ['s1'] }), zone({ name: 'Back', station: 2, sensorIds: ['s2'] })];
+
+  it('before start: not running, every zone listed without a decision', () => {
+    const t = setup(config(twoZones()));
+
+    expect(t.monitor.status()).toEqual({
+      at: NOW,
+      running: false,
+      dryRun: false,
+      pollIntervalMinutes: 15,
+      polling: false,
+      zones: [
+        { key: 'dev1:1', name: 'Front' },
+        { key: 'dev1:2', name: 'Back' },
+      ],
+      sequences: [],
+      outages: [],
+      alerts: [],
+    });
+  });
+
+  it('after a poll: when it ran, when the next one is, and each zone’s decision', async () => {
+    const t = setup(config(twoZones()));
+    t.setReadings(reading('s1', 50.04), reading('s2', 20));
+
+    t.monitor.start();
+    await flush();
+    const s = t.monitor.status();
+
+    expect(s.running).toBe(true);
+    expect(s.startedAt).toEqual(NOW);
+    expect(s.polling).toBe(false);
+    expect(s.lastPoll).toEqual({ startedAt: NOW, finishedAt: NOW, ok: true });
+    expect(s.nextPollAt).toEqual(new Date(NOW.getTime() + INTERVAL_MS));
+    expect(s.zones).toEqual([
+      { key: 'dev1:1', name: 'Front', decision: { at: NOW, action: 'none', reason: 'moist', detail: expect.any(String), moisturePct: 50 } },
+      { key: 'dev1:2', name: 'Back', decision: { at: NOW, action: 'water', reason: 'dry', detail: expect.any(String), moisturePct: 20, runMinutes: 10 } },
+    ]);
+    await t.monitor.stop();
+  });
+
+  it('says when a poll is in progress', async () => {
+    const t = setup(config([zone()]));
+    let finish: (r: MoistureReading[]) => void = () => {};
+    t.source.read.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+
+    t.monitor.start();
+    await flush();
+    expect(t.monitor.status()).toMatchObject({ running: true, polling: true });
+    expect(t.monitor.status().nextPollAt).toBeUndefined();
+
+    finish([reading('s1', 50)]);
+    await flush();
+    expect(t.monitor.status().polling).toBe(false);
+    await t.monitor.stop();
+  });
+
+  it('reports a failed poll with its error, and the service that is down', async () => {
+    const t = setup(config([zone()]));
+    t.source.read.mockRejectedValueOnce(new Error('Tuya GET /v1.0/token timed out after 20s'));
+
+    t.monitor.start();
+    await flush();
+    const s = t.monitor.status();
+
+    expect(s.lastPoll).toEqual({ startedAt: NOW, finishedAt: NOW, ok: false, error: 'Tuya GET /v1.0/token timed out after 20s' });
+    expect(s.outages).toEqual([{ service: 'tuya', since: NOW, failures: 1, lastError: 'Tuya GET /v1.0/token timed out after 20s' }]);
+    expect(s.zones.every((z) => z.decision === undefined)).toBe(true);
+    await t.monitor.stop();
+  });
+
+  it('keeps the last decisions when a later poll fails', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 50));
+    t.monitor.start();
+    await flush();
+
+    t.source.read.mockRejectedValueOnce(new Error('down'));
+    t.advance(15);
+    vi.advanceTimersByTime(INTERVAL_MS);
+    await flush();
+    const s = t.monitor.status();
+
+    expect(s.lastPoll).toMatchObject({ ok: false, error: 'down' });
+    expect(s.zones[0]?.decision).toMatchObject({ at: NOW, reason: 'moist' });
+    await t.monitor.stop();
+  });
+
+  it('lists watering sequences in progress', async () => {
+    const t = setup(config([zone({ name: 'Front', runMinutes: 35, maxCycleMinutes: 15, soakMinutes: 30, maxMinutesPerDay: 60 })]));
+    t.setReadings(reading('s1', 10));
+
+    await t.monitor.runCycle();
+
+    expect(t.monitor.status().sequences).toEqual([
+      {
+        id: expect.any(String),
+        deviceId: 'dev1',
+        zoneNames: ['Front'],
+        nextCycle: 2,
+        cycles: 3,
+        dueAt: new Date(NOW.getTime() + (11.7 + 30) * MINUTE_MS),
+        attempts: 0,
+      },
+    ]);
+  });
+
+  it('lists open alerts', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 50, { batteryPct: 5 }));
+
+    await t.monitor.runCycle();
+
+    expect(t.monitor.status().alerts).toEqual([{ key: 'battery:sensor:s1', state: 'low', since: NOW }]);
+  });
+
+  it('says when it has stopped', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 50));
+    t.monitor.start();
+    await flush();
+
+    await t.monitor.stop();
+    const s = t.monitor.status();
+
+    expect(s.running).toBe(false);
+    expect(s.nextPollAt).toBeUndefined();
+    expect(s.lastPoll?.ok).toBe(true);
+  });
+
+  it('reports a dry run', () => {
+    expect(setup(config([zone()], { dryRun: true })).monitor.status().dryRun).toBe(true);
+  });
+
+  it('returns a copy: changing it changes nothing in the monitor', async () => {
+    const t = setup(config([zone({ runMinutes: 35, maxCycleMinutes: 15, maxMinutesPerDay: 60 })]));
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+
+    const s = t.monitor.status();
+    s.sequences[0]?.zoneNames.push('Hacked');
+    s.sequences[0]?.dueAt.setFullYear(2000);
+    s.zones.pop();
+
+    const again = t.monitor.status();
+    expect(again.sequences[0]?.zoneNames).toEqual(['Zone 1']);
+    expect(again.sequences[0]?.dueAt.getFullYear()).toBe(2026);
+    expect(again.zones).toHaveLength(1);
+  });
+
+  it('makes no network calls', async () => {
+    const t = setup(config([zone()]));
+    t.monitor.status();
+
+    expect(t.source.read).not.toHaveBeenCalled();
+    expect(t.bhyve.getDevices).not.toHaveBeenCalled();
+    expect(t.bhyve.getDevice).not.toHaveBeenCalled();
+  });
+});

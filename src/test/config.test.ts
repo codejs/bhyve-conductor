@@ -20,6 +20,8 @@ const ALL_KEYS = [
   'LOCATION',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_CHAT_ID',
+  'TELEGRAM_COMMANDS',
+  'TELEGRAM_COMMAND_USER_IDS',
   'LOG_LEVEL',
 ] as const;
 
@@ -95,6 +97,55 @@ describe('loadConfig', () => {
     vi.stubEnv(key, value);
 
     expect(() => loadConfig([key])).toThrow(key);
+  });
+
+  describe('Telegram commands', () => {
+    const load = () => loadConfig(['TELEGRAM_COMMANDS', 'TELEGRAM_COMMAND_USER_IDS']);
+
+    it('are off, with no allowed users, unless set', () => {
+      expect(load()).toEqual({ TELEGRAM_COMMANDS: false, TELEGRAM_COMMAND_USER_IDS: [] });
+      vi.stubEnv('TELEGRAM_COMMANDS', '');
+      vi.stubEnv('TELEGRAM_COMMAND_USER_IDS', ' ');
+      expect(load()).toEqual({ TELEGRAM_COMMANDS: false, TELEGRAM_COMMAND_USER_IDS: [] });
+    });
+
+    it.each([
+      ['on', true],
+      ['true', true],
+      ['1', true],
+      ['off', false],
+      ['false', false],
+      ['0', false],
+    ])('TELEGRAM_COMMANDS=%s → %s', (value, expected) => {
+      vi.stubEnv('TELEGRAM_COMMANDS', value);
+      expect(load().TELEGRAM_COMMANDS).toBe(expected);
+    });
+
+    it.each(['yes', 'ON', 'enabled', '2'])('rejects TELEGRAM_COMMANDS=%s rather than guessing', (value) => {
+      vi.stubEnv('TELEGRAM_COMMANDS', value);
+      expect(load).toThrow(/TELEGRAM_COMMANDS: expected 'on' or 'off'/);
+    });
+
+    it('parses the allowed user ids', () => {
+      vi.stubEnv('TELEGRAM_COMMAND_USER_IDS', ' 4242, 5151 ,,9007199254740991');
+      expect(load().TELEGRAM_COMMAND_USER_IDS).toEqual([4242, 5151, 9007199254740991]);
+    });
+
+    it.each([
+      ['@owner', /numeric Telegram user ids/],
+      ['-4242', /numeric Telegram user ids/],
+      ['0', /numeric Telegram user ids/],
+      ['0042', /numeric Telegram user ids/],
+      ['42.5', /numeric Telegram user ids/],
+      ['1e6', /numeric Telegram user ids/],
+      ['42;43', /numeric Telegram user ids/],
+      ['12345678901234567', /numeric Telegram user ids/],
+      // Would round to a different number, i.e. somebody else's id.
+      ['9007199254740993', /out of range/],
+    ])('rejects TELEGRAM_COMMAND_USER_IDS=%s', (value, message) => {
+      vi.stubEnv('TELEGRAM_COMMAND_USER_IDS', value);
+      expect(load).toThrow(message);
+    });
   });
 
   it('splits sensor IDs on commas and trims blanks', () => {

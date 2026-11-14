@@ -174,6 +174,14 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
       return `▶ ${String(e.note)}`;
     case 'notification.failed':
       return `notification NOT delivered after ${String(e.attempts)} attempt(s): ${String(e.error)}`;
+    case 'command.handled':
+      return `telegram command /${String(e.command)} from user ${String(e.user)}: ${String(e.outcome)} in ${String(e.ms)} ms${
+        e.error === undefined ? '' : ` (${String(e.error)})`
+      }`;
+    case 'command.rejected':
+      return `telegram command${e.command === undefined ? '' : ` /${String(e.command)}`} REJECTED (${String(e.reason)}) from user ${String(
+        e.user ?? '?',
+      )} in chat ${String(e.chat)}`;
     default: {
       const { ts: _ts, type: _type, ...rest } = e;
       return JSON.stringify(rest);

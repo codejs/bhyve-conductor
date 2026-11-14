@@ -158,4 +158,22 @@ describe('ConnectionHealth', () => {
     expect(health.isDown('bhyve')).toBe(false);
     expect(audit.events.map((e) => e.type)).toEqual(['connection.lost']);
   });
+
+  it('lists the current outages, as copies', () => {
+    expect(health.outages()).toEqual([]);
+    health.failed('tuya', new Error('timed out'));
+    now = new Date('2026-07-01T12:05:00Z');
+    health.failed('tuya', new Error('HTTP 502'));
+    health.failed('weather', 'HTTP 503');
+
+    const list = health.outages();
+    expect(list).toEqual([
+      { service: 'tuya', since: new Date('2026-07-01T12:00:00Z'), failures: 2, lastError: 'HTTP 502' },
+      { service: 'weather', since: new Date('2026-07-01T12:05:00Z'), failures: 1, lastError: 'HTTP 503' },
+    ]);
+
+    list[0]?.since.setFullYear(2000);
+    health.ok('weather');
+    expect(health.outages()).toEqual([{ service: 'tuya', since: new Date('2026-07-01T12:00:00Z'), failures: 2, lastError: 'HTTP 502' }]);
+  });
 });

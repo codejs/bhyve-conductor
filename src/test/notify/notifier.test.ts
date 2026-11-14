@@ -223,4 +223,52 @@ describe('Notifier', () => {
     expect(() => notifier.record('battery.low', { kind: 'sensor', name: 'A', batteryPct: 5 })).not.toThrow();
     expect(log.error).toHaveBeenCalledWith(expect.stringContaining('battery.low'), expect.any(Error));
   });
+
+  describe('Telegram commands', () => {
+    it('warns about a command from someone who is not allowed', () => {
+      const t = setup();
+      t.record('command.rejected', { reason: 'other-chat', chat: 6666, user: 6666, userName: 'mallory', command: 'bhyve_devices', notify: true });
+
+      expect(t.sent).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          type: 'command.rejected',
+          text:
+            '🚫 <b>Ignored a bot command</b> /bhyve_devices from user 6666 (@mallory) in chat 6666 (other-chat).\n' +
+            'Nothing was run. If this wasn’t you, no action is needed; if it was, check TELEGRAM_COMMAND_USER_IDS.',
+        }),
+      ]);
+    });
+
+    it('copes with a rejection that has no user or command', () => {
+      const t = setup();
+      t.record('command.rejected', { reason: 'anonymous', chat: -100123, notify: true });
+
+      expect(t.texts()).toEqual([expect.stringMatching(/^🚫 <b>Ignored a bot command<\/b> from user \? in chat -100123 \(anonymous\)/)]);
+    });
+
+    it('escapes what the sender controls', () => {
+      const t = setup();
+      t.record('command.rejected', { reason: 'user-not-allowed', chat: 1, user: 2, userName: '<b>x</b>', command: '<i>', notify: true });
+
+      expect(t.texts()[0]).toContain('(@&lt;b&gt;x&lt;/b&gt;)');
+      expect(t.texts()[0]).toContain(' /&lt;i&gt; ');
+    });
+
+    it('keeps forwarded / inline-bot rejections and handled commands in the audit only', () => {
+      const t = setup();
+      t.record('command.rejected', { reason: 'forwarded', chat: 1, user: 2, notify: false });
+      t.record('command.rejected', { reason: 'via-bot', chat: 1, user: 2 });
+      t.record('command.handled', { command: 'status', user: 2, outcome: 'ok', ms: 3 });
+
+      expect(t.sent).toEqual([]);
+    });
+
+    it('is filtered out by minSeverity critical', () => {
+      const t = setup({ minSeverity: 'critical' });
+      t.record('command.rejected', { reason: 'other-chat', chat: 1, user: 1, notify: true });
+
+      expect(t.sent).toEqual([]);
+    });
+  });
 });

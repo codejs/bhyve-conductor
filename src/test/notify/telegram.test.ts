@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { escapeHtml, TelegramClient, TelegramPermanentError, TelegramRateLimitError } from '../../notify/telegram.ts';
+import { escapeHtml, TelegramClient, TelegramConflictError, TelegramPermanentError, TelegramRateLimitError } from '../../notify/telegram.ts';
 import { fetchCall, hangingFetch, jsonResponse, mockFetch, type FetchMock } from '../utils/fetch.ts';
 
 const TOKEN = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw';
@@ -59,5 +59,189 @@ describe('TelegramClient', () => {
 
   it('escapes text for HTML mode', () => {
     expect(escapeHtml('a < b && c > d')).toBe('a &lt; b &amp;&amp; c &gt; d');
+  });
+});
+
+describe('TelegramClient (commands)', () => {
+  let fetchMock: FetchMock;
+  const client = () => new TelegramClient({ token: TOKEN, chatId: '4242' });
+  const message = (overrides: Record<string, unknown> = {}) => ({
+    message_id: 5,
+    date: 1_780_000_000,
+    chat: { id: 4242, type: 'private', first_name: 'Owner' },
+    from: { id: 4242, is_bot: false, first_name: 'Owner', username: 'owner', language_code: 'en' },
+    text: '/status',
+    entities: [{ type: 'bot_command', offset: 0, length: 7 }],
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    fetchMock = mockFetch();
+  });
+
+  it('getMe returns the bot account', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: { id: 999, is_bot: true, first_name: 'Lawn', username: 'LawnBot', can_join_groups: true } }));
+
+    await expect(client().getMe()).resolves.toEqual({ id: 999, is_bot: true, first_name: 'Lawn', username: 'LawnBot' });
+    expect(fetchCall(fetchMock, 0).url).toBe(`https://api.telegram.org/bot${TOKEN}/getMe`);
+  });
+
+  it('getMe rejects a response of the wrong shape', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: { id: 'x' } }));
+
+    await expect(client().getMe()).rejects.toThrow('Telegram getMe returned an unexpected response');
+  });
+
+  it('getUpdates long-polls for messages only, from the given offset', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: [{ update_id: 10, message: message() }] }));
+
+    const updates = await client().getUpdates({ offset: 10, timeoutSeconds: 50 });
+
+    const call = fetchCall(fetchMock, 0);
+    expect(call.url).toBe(`https://api.telegram.org/bot${TOKEN}/getUpdates`);
+    expect(call.method).toBe('POST');
+    expect(call.body).toEqual({ offset: 10, timeout: 50, allowed_updates: ['message'] });
+    expect(updates).toEqual([
+      {
+        update_id: 10,
+        message: {
+          message_id: 5,
+          date: 1_780_000_000,
+          chat: { id: 4242, type: 'private' },
+          from: { id: 4242, is_bot: false, first_name: 'Owner', username: 'owner' },
+          text: '/status',
+        },
+      },
+    ]);
+  });
+
+  it('getUpdates leaves out the offset when there is none yet', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: [] }));
+
+    await client().getUpdates({ timeoutSeconds: 0 });
+
+    expect(fetchCall(fetchMock, 0).body).toEqual({ timeout: 0, allowed_updates: ['message'] });
+  });
+
+  it('getUpdates keeps the fields that reveal who really sent a message', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        result: [
+          { update_id: 1, message: message({ forward_origin: { type: 'user', date: 1, sender_user: { id: 6, is_bot: false, first_name: 'M' } } }) },
+          { update_id: 2, message: message({ sender_chat: { id: -100, type: 'channel' } }) },
+          { update_id: 3, message: message({ via_bot: { id: 7, is_bot: true, first_name: 'B' } }) },
+          { update_id: 4, message: message({ forward_date: 1, forward_from: { id: 6 } }) },
+          { update_id: 5, message: message({ is_automatic_forward: true }) },
+        ],
+      }),
+    );
+
+    const [fwd, anon, via, legacy, auto] = await client().getUpdates({ timeoutSeconds: 0 });
+
+    expect(fwd?.message?.forward_origin).toBeDefined();
+    expect(anon?.message?.sender_chat).toBeDefined();
+    expect(via?.message?.via_bot).toBeDefined();
+    expect(legacy?.message?.forward_date).toBe(1);
+    expect(legacy?.message?.forward_from).toBeDefined();
+    expect(auto?.message?.is_automatic_forward).toBe(true);
+  });
+
+  it('getUpdates drops a message it cannot trust, but keeps its id so it is acknowledged', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        result: [
+          { update_id: 1, message: message({ from: { id: '4242', is_bot: false } }) }, // id as a string
+          { update_id: 2, message: message({ chat: { id: 4242.5, type: 'private' } }) },
+          { update_id: 3, message: message({ text: 42 }) },
+          { update_id: 4, edited_message: message() }, // not asked for, but harmless
+          { update_id: 5, message: message() },
+          { nonsense: true },
+          'garbage',
+        ],
+      }),
+    );
+
+    const updates = await client().getUpdates({ timeoutSeconds: 0 });
+
+    expect(updates.map((u) => [u.update_id, u.message !== undefined])).toEqual([
+      [1, false],
+      [2, false],
+      [3, false],
+      [4, false],
+      [5, true],
+    ]);
+  });
+
+  it('getUpdates rejects a result that is not a list', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: { update_id: 1 } }));
+
+    await expect(client().getUpdates({ timeoutSeconds: 0 })).rejects.toThrow('Telegram getUpdates returned an unexpected response');
+  });
+
+  it('getUpdates reports a 409 conflict (another poller or a webhook) distinctly', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ok: false, error_code: 409, description: 'Conflict: terminated by other getUpdates request' }, 409),
+    );
+
+    const err = await client().getUpdates({ timeoutSeconds: 0 }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(TelegramConflictError);
+    expect((err as Error).message).toBe('Telegram getUpdates failed: 409 Conflict: terminated by other getUpdates request');
+  });
+
+  it('getUpdates treats a bad token as permanent', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: false, error_code: 401, description: 'Unauthorized' }, 401));
+
+    await expect(client().getUpdates({ timeoutSeconds: 0 })).rejects.toBeInstanceOf(TelegramPermanentError);
+  });
+
+  it('getUpdates can be aborted (shutdown), without the token in the error', async () => {
+    fetchMock.mockImplementationOnce(hangingFetch);
+    const abort = new AbortController();
+
+    const pending = client().getUpdates({ timeoutSeconds: 50, signal: abort.signal }).catch((e: unknown) => e);
+    abort.abort();
+    const err = (await pending) as Error;
+
+    expect(err.message).toBe('Telegram getUpdates aborted');
+    expect(err.message).not.toContain(TOKEN);
+  });
+
+  it('getUpdates waits longer than the long poll before timing out', async () => {
+    fetchMock.mockImplementationOnce(hangingFetch);
+    const c = new TelegramClient({ token: TOKEN, chatId: '4242', timeoutMs: 10 });
+
+    const abort = new AbortController();
+
+    // timeout 0 s + the 15 s margin: not the 10 ms sendMessage timeout.
+    const pending = c.getUpdates({ timeoutSeconds: 0, signal: abort.signal }).catch((e: unknown) => e);
+    const early = await Promise.race([pending, new Promise((r) => setTimeout(() => r('still waiting'), 100))]);
+
+    expect(early).toBe('still waiting');
+    abort.abort();
+    expect(((await pending) as Error).message).toBe('Telegram getUpdates aborted');
+  });
+
+  it('setMyCommands sets the menu for the one chat', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: true }));
+
+    await client().setMyCommands([{ command: 'status', description: 'Status' }], -100123);
+
+    const call = fetchCall(fetchMock, 0);
+    expect(call.url).toBe(`https://api.telegram.org/bot${TOKEN}/setMyCommands`);
+    expect(call.body).toEqual({ commands: [{ command: 'status', description: 'Status' }], scope: { type: 'chat', chat_id: -100123 } });
+  });
+
+  it.each(['getMe', 'getUpdates', 'setMyCommands'] as const)('%s never puts the token in error messages', async (method) => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    const c = client();
+    const call = method === 'getMe' ? c.getMe() : method === 'getUpdates' ? c.getUpdates({ timeoutSeconds: 0 }) : c.setMyCommands([], 1);
+
+    const err = (await call.catch((e: unknown) => e)) as Error;
+
+    expect(err.message).toBe(`Telegram ${method} TypeError: fetch failed`);
+    expect(err.message).not.toContain(TOKEN);
   });
 });
