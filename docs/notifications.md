@@ -57,7 +57,7 @@ Every notification comes from an audit event, so anything you were told about is
 
 - **Transitions only.** A low battery is reported once, not on every poll. It's reported again
   only after a real recovery (≥ 10 points above the low level).
-- **Conditions survive restarts.** Open alerts are saved in the state file, so a restart doesn't
+- **Conditions survive restarts.** Open alerts are saved in the database, so a restart doesn't
   repeat them.
 - **Grace period for connections.** A blip that heals within `connectionGraceMinutes` produces
   no messages at all.
@@ -72,7 +72,7 @@ Every notification comes from an audit event, so anything you were told about is
 
 Notifications never block or delay watering. Failed sends are retried after 5 s, 30 s, 2 min and 10 min.
 Telegram's "retry after" is honoured, and messages Telegram will never accept (bad token or chat) are not
-retried. At most 100 messages wait in the queue. Anything dropped is recorded in the audit file as
+retried. At most 100 messages wait in the queue. Anything dropped is recorded in the audit trail as
 `notification.failed` (`npm run audit -- --type notification`). At shutdown, pending messages get up
 to 10 s to go out.
 

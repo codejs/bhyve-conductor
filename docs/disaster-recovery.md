@@ -16,8 +16,9 @@ lists what can go wrong, what the conductor does about it automatically, and how
    the sequence is abandoned.
 4. **Nothing hangs.** Every request has a timeout (20 s, socket connect 15 s), and each poll has a
    10-minute watchdog, so one stuck connection can't stop monitoring.
-5. **Everything is on the record.** Each failure and recovery goes to the audit trail
-   (`.conductor-audit.jsonl`, set by `CONDUCTOR_AUDIT`).
+5. **Everything is on the record.** Each failure and recovery goes to the audit trail, kept with the
+   watering history and pending cycles in the SQLite database (`.conductor.db`, set by `CONDUCTOR_DB`;
+   see [sqlite-storage.md](sqlite-storage.md)).
 
 The controller itself runs a manual run to completion on its own. Losing the connection *while
 water is flowing* doesn't stop or extend the watering. The risky moments are when a command is being
@@ -40,9 +41,10 @@ sent, and the soak gaps between cycles.
 | 11 | **Clean stop** (SIGTERM/Ctrl+C) mid-sequence | Timers stop; the sequence stays saved and resumes on the next start (see #10). | `service.stopped` | Restart within the resume window, or the rest is abandoned. |
 | 12 | **A request hangs** (half-open connection) | Times out after 20 s. If something else hangs, the 10-minute poll watchdog gives up on that poll and the loop continues. A late-waking stale poll can't start a second sequence on a device. | `poll.failed` (`timed out…` / `poll did not finish within 10 min`) | A watchdog entry means an unexpected hang: please report it. |
 | 13 | **Open-Meteo unreachable** | Dry zones get their fixed `runMinutes` for that poll. | `connection.lost` (`weather`) → `connection.restored` | Nothing. |
-| 14 | **State file can't be written** (disk full, permissions) | Watering continues, but cooldowns and pending cycles won't survive a restart. | `state.save_failed` | Fix the disk or permissions. |
-| 15 | **Audit file can't be written** | Logged as an error; operation is unaffected. | (service log only) | Fix the disk or permissions. |
+| 14 | **Database can't be written** (disk full, I/O error, locked, read-only) | Watering continues. Each write that failed is kept in memory and replayed in order once writing works again, so the database catches up with everything that happened meanwhile. A restart *during* the outage loses what wasn't written (a cooldown could then be shorter than configured). | `state.save_failed` once, `state.save_restored` at the end (if the database itself is the problem, both still reach Telegram) | Fix the disk or permissions. |
+| 15 | **Audit events can't be written** (same causes) | Logged as errors; watering is unaffected. Telegram still gets its messages. | (service log only) | As #14. |
 | 16 | **Telegram unreachable** | Notifications are retried (5 s → 10 min), then dropped; watering is never affected. | `notification.failed` | Check the bot token/chat (`npm run notify:test`). |
+| 17 | **Schema upgrade fails** after installing a new version | The database is copied to `<file>.before-<migration>` first; the failed upgrade rolls back completely and the conductor refuses to start, saying why. | (service log) | Fix or roll back the release. The copy is only needed if something else went wrong. |
 
 ## Being told, and rehearsing
 
@@ -111,9 +113,11 @@ In `conductor.json` (all optional):
 
 - Run the conductor under a supervisor that restarts it (systemd `Restart=always`, pm2, Docker
   `restart: unless-stopped`), so a crash is followed by a resume within the window.
-- The audit file only grows (a few KB a day). Rotate it with `logrotate` using `copytruncate`, or just
-  archive it occasionally. The conductor only reads the last 64 KB at startup.
-- Keep `.conductor-state.json` on persistent storage; it holds the cooldowns and pending cycles.
+- Keep the database (`.conductor.db`, with its `-wal` and `-shm` files while running) on persistent
+  storage; it holds the cooldowns, pending cycles and the audit trail. Back it up with
+  `sqlite3 .conductor.db ".backup copy.db"` (safe while the conductor runs), not by copying the file.
+- It grows by a few MB a year. Old audit events can be deleted (`DELETE FROM audit_event WHERE ts < ...`);
+  the watering history and sequences are worth keeping.
 
 ## Assumptions to be aware of
 

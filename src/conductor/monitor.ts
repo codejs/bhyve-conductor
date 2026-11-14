@@ -12,14 +12,11 @@ import type { ConductorConfig } from './config.ts';
 import type { WateringHistory } from './history.ts';
 import { applyDeviceState, applyForecast, evaluateZone, type DeviceCommand, type ZoneDecision } from './plan.ts';
 import { Sequencer } from './sequencer.ts';
-import type { ConductorState, PendingSequence } from './state.ts';
+import type { PendingSequence } from './state.ts';
+import { guardStore, noStore, type ConductorStore, type SavedZoneSpell } from './store.ts';
 
 /** The parts of BhyveClient the monitor needs (lets tests pass a fake). */
 export type BhyveControl = Pick<BhyveClient, 'getDevices' | 'getDevice' | 'getPrograms' | 'startWatering' | 'onEvent'>;
-
-export interface StateStore {
-  save(state: ConductorState): Promise<void>;
-}
 
 export interface MonitorDeps {
   config: ConductorConfig;
@@ -30,8 +27,15 @@ export interface MonitorDeps {
   pendingSequences?: PendingSequence[];
   /** Alert conditions saved by a previous run (so they aren't reported again). */
   alertState?: AlertState;
-  /** Where to persist history and pending sequences. Omit to keep them in memory only. */
-  store?: StateStore;
+  /** Zone dry spells and sensor blackouts saved by a previous run (see #restoreSpells). */
+  zoneSpells?: readonly SavedZoneSpell[];
+  /**
+   * Where to persist every step (watering, alerts, readings, spells). Omit to keep them in memory only.
+   * Ignored in dry runs, which must leave no trace that would change the real service's decisions.
+   */
+  store?: ConductorStore;
+  /** Called after every poll, successful or not (the service run's heartbeat). */
+  heartbeat?: () => void;
   /** Enables forecast-based amounts. Without it, dry zones get their fixed `runMinutes`. */
   weather?: WeatherProvider;
   /** Audit trail for connectivity and watering events. */
@@ -63,6 +67,8 @@ const BELOW_THRESHOLD = new Set(['dry', 'cooldown', 'daily-limit', 'forecast-cov
 const EXPECTED_SKIPS = new Set(['cooldown', 'daily-limit', 'rain-delay', 'already-watering', 'soaking']);
 
 const noAudit: AuditSink = { record: () => {} };
+/** Saved spells older than this many poll intervals are stale: the service was down in between. */
+const SPELL_FRESH_POLLS = 2;
 
 /**
  * Polls the soil sensors and starts a supplemental B-hyve run for each zone whose soil is
@@ -82,7 +88,7 @@ export class Monitor {
   #running = false;
   #resumed = false;
   #inFlight: Promise<unknown> | undefined;
-  #saveQueue: Promise<void> = Promise.resolve();
+  readonly #store: ConductorStore;
   /** When each zone was first seen below its threshold in the current dry spell. */
   readonly #drySince = new Map<string, Date>();
   /** Zones currently without any usable sensor reading, and since when. */
@@ -95,18 +101,35 @@ export class Monitor {
     this.#clock = deps.clock ?? systemClock;
     this.#now = deps.now ?? (() => this.#clock.now());
     this.#audit = deps.audit ?? noAudit;
+    this.#store = deps.store && !deps.config.dryRun ? guardStore(deps.store, this.#audit, this.#now) : noStore;
     this.#health = new ConnectionHealth(this.#audit, this.#now);
     this.#sequencer = new Sequencer({
       bhyve: deps.bhyve,
       history: deps.history,
       audit: this.#audit,
       health: this.#health,
-      save: () => this.#persist(),
+      store: this.#store,
       options: deps.config.recovery,
       now: this.#now,
       clock: this.#clock,
     });
     this.#alerts = new AlertTracker(this.#audit, deps.config.alerts, this.#now, deps.alertState);
+    this.#restoreSpells(deps.zoneSpells ?? []);
+  }
+
+  /**
+   * Carries on a dry spell (it counts against maxWaitHours) and a sensor blackout (so it isn't reported
+   * again) across a quick restart. After a longer gap the saved spells say nothing about now: discarded.
+   */
+  #restoreSpells(spells: readonly SavedZoneSpell[]): void {
+    const now = this.#now().getTime();
+    const freshMs = SPELL_FRESH_POLLS * this.#deps.config.pollIntervalMinutes * MINUTE_MS;
+    const zones = new Set(this.#deps.config.zones.map((z) => z.key));
+    for (const s of spells) {
+      if (!zones.has(s.zoneKey) || now - s.evaluatedAt.getTime() > freshMs) continue;
+      if (s.drySince) this.#drySince.set(s.zoneKey, s.drySince);
+      if (s.noDataSince) this.#noDataSince.set(s.zoneKey, s.noDataSince);
+    }
   }
 
   get health(): ConnectionHealth {
@@ -127,12 +150,21 @@ export class Monitor {
     const now = this.#now();
 
     const readings = await this.#readSensors();
+    this.#store.recordReadings([...readings.values()], now);
     let alertsChanged = this.#alerts.checkReadings(config.zones, readings);
     let devices = await this.#periodicDeviceCheck(now);
 
     let decisions = config.zones.map((zone) => evaluateZone(zone, readings, history, now));
     this.#trackDrySpells(decisions, now);
     this.#trackSensorData(decisions, now);
+    this.#store.saveZoneSpells(
+      config.zones.map((z) => {
+        const drySince = this.#drySince.get(z.key);
+        const noDataSince = this.#noDataSince.get(z.key);
+        return { zoneKey: z.key, ...(drySince ? { drySince } : {}), ...(noDataSince ? { noDataSince } : {}) };
+      }),
+      now,
+    );
     alertsChanged = this.#alerts.checkDecisions(decisions) || alertsChanged;
     let commands: DeviceCommand[] = [];
 
@@ -157,7 +189,7 @@ export class Monitor {
           this.#lastDeviceCheck = now;
         } catch (err) {
           this.#health.failed('bhyve', err);
-          if (alertsChanged) await this.#persist();
+          if (alertsChanged) this.#saveAlerts();
           throw err;
         }
         alertsChanged = this.#alerts.checkDevices(devices) || alertsChanged;
@@ -167,7 +199,8 @@ export class Monitor {
     }
     decisions.forEach(logDecision);
     this.#auditDecisionChanges(decisions);
-    if (alertsChanged) await this.#persist();
+    if (alertsChanged) this.#saveAlerts();
+    this.#pruneHistory(now);
 
     const sent: DeviceCommand[] = [];
     const failed: CycleResult['failed'] = [];
@@ -185,7 +218,8 @@ export class Monitor {
       const zones = decisions
         .filter((d) => d.action === 'water' && d.zone.deviceId === command.deviceId)
         .map((d) => ({ zone: d.zone.key, name: d.zone.name, moisturePct: d.reading?.moisturePct, minutes: d.runMinutes, why: d.detail }));
-      const result = await this.#sequencer.start(command, { zones });
+      const why = decisions.filter((d) => d.action === 'water' && d.zone.deviceId === command.deviceId);
+      const result = await this.#sequencer.start(command, { zones }, why);
       if (result === 'delivered') sent.push(command);
       else failed.push({ command, error: new Error(`watering on device ${command.deviceId} did not start (${result})`) });
     }
@@ -224,7 +258,7 @@ export class Monitor {
     try {
       const devices = await this.#deps.bhyve.getDevices();
       this.#health.ok('bhyve');
-      if (this.#alerts.checkDevices(devices)) await this.#persist();
+      if (this.#alerts.checkDevices(devices)) this.#saveAlerts();
       return devices;
     } catch (err) {
       this.#health.failed('bhyve', err);
@@ -323,24 +357,15 @@ export class Monitor {
     });
   }
 
-  /** Saves history + pending sequences. Saves are queued so concurrent sequences can't interleave writes. */
-  #persist(): Promise<void> {
-    const { config, history, store } = this.#deps;
-    // A dry run must leave no trace in the state file (it would hide alerts from the real service).
-    if (config.dryRun) return this.#saveQueue;
-    this.#saveQueue = this.#saveQueue.then(async () => {
-      const now = this.#now();
-      const longestCooldown = Math.max(0, ...config.zones.map((z) => z.cooldownMinutes));
-      history.prune(now, longestCooldown * MINUTE_MS);
-      try {
-        await store?.save({ history, sequences: this.#sequencer.pending(), alerts: this.#alerts.state });
-      } catch (err) {
-        // Watering carries on, but a restart now could water a zone again too soon or lose a sequence.
-        log.error('Could not save state; cooldowns and pending cycles will not survive a restart', err);
-        this.#audit.record('state.save_failed', { error: errorMessage(err) });
-      }
-    });
-    return this.#saveQueue;
+  /** The open alert conditions (a dry run saves nothing: it would hide alerts from the real service). */
+  #saveAlerts(): void {
+    this.#store.saveAlerts(this.#alerts.state);
+  }
+
+  /** In memory, only what cooldowns and the 24 h cap can still need (the database keeps everything). */
+  #pruneHistory(now: Date): void {
+    const longestCooldown = Math.max(0, ...this.#deps.config.zones.map((z) => z.cooldownMinutes));
+    this.#deps.history.prune(now, longestCooldown * MINUTE_MS);
   }
 
   /** Polls now and then every `pollIntervalMinutes` (measured from the end of each cycle, so cycles never overlap). */
@@ -373,6 +398,11 @@ export class Monitor {
       .finally(() => {
         this.#clock.clearTimeout(watchdog);
         this.#inFlight = undefined;
+        try {
+          this.#deps.heartbeat?.();
+        } catch (err) {
+          log.error('Could not record the heartbeat', err);
+        }
         if (this.#running) {
           this.#timer = this.#clock.setTimeout(() => this.#tick(), this.#deps.config.pollIntervalMinutes * MINUTE_MS);
         }
@@ -386,7 +416,6 @@ export class Monitor {
     this.#timer = undefined;
     this.#sequencer.stop();
     await this.#inFlight;
-    await this.#saveQueue;
   }
 }
 

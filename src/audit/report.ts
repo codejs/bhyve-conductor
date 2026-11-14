@@ -18,6 +18,7 @@ export const RECOVERY_TYPES: ReadonlySet<AuditType> = new Set<AuditType>([
   'wave.retry_scheduled',
   'wave.assumed_delivered',
   'state.save_failed',
+  'state.save_restored',
   'battery.low',
   'battery.ok',
   'moisture.critical_low',
@@ -37,10 +38,14 @@ export interface AuditFilter {
   device?: string;
   /** "<deviceId>:<station>" */
   zone?: string;
+  /** A sequence id or its beginning (messages show the first 8 characters). */
   sequence?: string;
   /** Only failures and recoveries. */
   recovery?: boolean;
 }
+
+/** Sequence ids are UUIDs; the first 8 characters identify one in messages and on the command line. */
+export const shortId = (id: string): string => id.slice(0, 8);
 
 const DURATION = /^(\d+(?:\.\d+)?)\s*(m|min|h|d|w)$/i;
 
@@ -80,7 +85,7 @@ export const filterEvents = (events: readonly AuditEvent[], f: AuditFilter): Aud
     if (f.types?.length && !f.types.some((p) => e.type === p || e.type.startsWith(`${p}.`))) return false;
     if (f.recovery && !RECOVERY_TYPES.has(e.type)) return false;
     if (f.device && e.device !== f.device) return false;
-    if (f.sequence && e.sequence !== f.sequence) return false;
+    if (f.sequence && !(typeof e.sequence === 'string' && e.sequence.startsWith(f.sequence))) return false;
     if (f.zone && !matchesZone(e, f.zone)) return false;
     return true;
   });
@@ -94,7 +99,7 @@ const stationsText = (e: AuditEvent): string => {
 /** One-line description of an event (without the timestamp); times inside it are shown in `timeZone`. */
 export const describe = (e: AuditEvent, timeZone?: string): string => {
   const at = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? formatTime(v, timeZone) : String(v));
-  const seq = typeof e.sequence === 'string' ? ` [seq ${e.sequence}]` : '';
+  const seq = typeof e.sequence === 'string' ? ` [seq ${shortId(e.sequence)}]` : '';
   const dev = typeof e.device === 'string' ? ` ${e.device}` : '';
   switch (e.type) {
     case 'service.started':
@@ -105,6 +110,12 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
       return `previous run ended without a clean shutdown (last event ${String(e.lastEvent)} at ${at(e.lastEventAt)})`;
     case 'poll.failed':
       return `poll failed: ${String(e.error)}`;
+    case 'state.save_failed':
+      return `could not save state (${String(e.step)}): ${String(e.error)}`;
+    case 'state.save_restored':
+      return `saving state works again after ${String(e.outageMinutes)} min (${String(e.failures)} failed saves; last error: ${String(e.lastError)})`;
+    case 'storage.imported':
+      return `imported the previous version's files: ${String(e.runs)} runs, ${String(e.sequences)} pending sequences, ${String(e.alerts)} alerts, ${String(e.auditEvents)} audit events`;
     case 'connection.lost':
       return `${String(e.service)} unreachable: ${String(e.error)}`;
     case 'connection.restored':
@@ -335,7 +346,7 @@ export const formatSummary = (s: ReturnType<typeof summarize>, timeZone?: string
       .filter(Boolean)
       .join(', ');
     lines.push(
-      `  ${q.sequence}  ${q.device.padEnd(12)} ${t(q.started)}  ${q.status.toUpperCase().padEnd(11)} ${amounts}` +
+      `  ${shortId(q.sequence)}  ${q.device.padEnd(12)} ${t(q.started)}  ${q.status.toUpperCase().padEnd(11)} ${amounts}` +
         (flags ? `  (${flags})` : '') +
         (q.note ? `  — ${q.note}` : ''),
     );

@@ -5,10 +5,15 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import type { BhyveDevice } from '../../bhyve/types.ts';
 import type { ConductorConfig, ZoneConfig } from '../../conductor/config.ts';
 import { WateringHistory } from '../../conductor/history.ts';
-import { Monitor, POLL_DEADLINE_MS, type StateStore } from '../../conductor/monitor.ts';
+import { count } from 'drizzle-orm';
+import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import { Monitor, POLL_DEADLINE_MS } from '../../conductor/monitor.ts';
 import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { PendingSequence } from '../../conductor/state.ts';
-import { FileStateStore } from '../../conductor/state.ts';
+import type { ConductorStore, SavedZoneSpell } from '../../conductor/store.ts';
+import { openDatabase } from '../../db/database.ts';
+import * as tables from '../../db/schema.ts';
+import { SqliteStore } from '../../db/store.ts';
 import { log } from '../../log.ts';
 import type { MoistureReading } from '../../sensors/types.ts';
 import type { Forecast, ForecastHour, WeatherProvider } from '../../weather/types.ts';
@@ -37,14 +42,18 @@ const setup = (
   cfg: ConductorConfig,
   opts: {
     history?: WateringHistory;
-    store?: StateStore;
+    store?: ConductorStore;
     weather?: WeatherProvider;
     audit?: MemoryAuditLog;
     pendingSequences?: PendingSequence[];
+    zoneSpells?: SavedZoneSpell[];
+    heartbeat?: () => void;
+    /** When the monitor is created (default NOW). */
+    start?: Date;
   } = {},
 ) => {
   let readings: MoistureReading[] = [];
-  let now = NOW;
+  let now = opts.start ?? NOW;
 
   const source = { id: 'fake', read: vi.fn(async () => readings) };
   const fake = fakeBhyve([bhyveDevice('dev1'), bhyveDevice('dev2')]);
@@ -59,6 +68,8 @@ const setup = (
     ...(opts.weather ? { weather: opts.weather } : {}),
     ...(opts.audit ? { audit: opts.audit } : {}),
     ...(opts.pendingSequences ? { pendingSequences: opts.pendingSequences } : {}),
+    ...(opts.zoneSpells ? { zoneSpells: opts.zoneSpells } : {}),
+    ...(opts.heartbeat ? { heartbeat: opts.heartbeat } : {}),
     now: () => now,
   });
 
@@ -78,6 +89,16 @@ const setup = (
       readings = readings.map((r) => ({ ...r, at: now }));
     },
   };
+};
+
+/** A real database and the store over it. */
+const sqlite = (path = ':memory:') => {
+  const db = openDatabase(path);
+  const store = new SqliteStore(db);
+  /** What the next start would load. */
+  const load = (at: Date = NOW) => store.loadState(at, 0);
+  const rows = (table: SQLiteTable): number => db.select({ n: count() }).from(table).get()?.n ?? 0;
+  return { db, store, load, rows };
 };
 
 describe('Monitor.runCycle', () => {
@@ -104,7 +125,7 @@ describe('Monitor.runCycle', () => {
   });
 
   it('waters a dry zone and records the run', async () => {
-    const store = { save: vi.fn(async () => {}) };
+    const { store, db, load } = sqlite();
     const t = setup(config([zone({ station: 2, runMinutes: 12 })]), { store });
     t.setReadings(reading('s1', 18));
 
@@ -113,8 +134,12 @@ describe('Monitor.runCycle', () => {
     expect(t.bhyve.startWatering).toHaveBeenCalledExactlyOnceWith('dev1', [{ station: 2, runTime: 12 }]);
     expect(result.sent).toHaveLength(1);
     expect(t.history.runs).toEqual([{ zoneKey: 'dev1:2', at: NOW, minutes: 12 }]);
-    // (the in-flight save before sending is checked with snapshots in sequencer.test.ts)
-    expect(store.save).toHaveBeenLastCalledWith({ history: t.history, sequences: [], alerts: expect.any(Object) });
+    // Saved: the run in the ledger, the sequence completed (the in-flight save is checked in sequencer.test.ts).
+    expect(load(NOW).history).toEqual([{ zoneKey: 'dev1:2', at: NOW, minutes: 12 }]);
+    expect(load(NOW).sequences).toEqual([]);
+    expect(db.select({ status: tables.sequenceResult.status, minutes: tables.sequenceResult.deliveredMinutes }).from(tables.sequenceResult).all()).toEqual([
+      { status: 'completed', minutes: 12 },
+    ]);
     expect(info).toHaveBeenCalledWith('Watering device dev1 (the run): station 2 for 12 min');
   });
 
@@ -172,19 +197,21 @@ describe('Monitor.runCycle', () => {
     expect(runTimes).toEqual([10, 10, 5]);
   });
 
-  it('remembers the cooldown across a restart via the history file', async () => {
+  it('remembers the cooldown across a restart via the database file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'conductor-monitor-'));
     try {
-      const store = new FileStateStore(join(dir, 'state.json'));
       const cfg = config([zone()]);
-
-      const first = setup(cfg, { history: (await store.load()).history, store });
+      const before = sqlite(join(dir, 'conductor.db'));
+      const first = setup(cfg, { history: new WateringHistory(before.load().history), store: before.store });
       first.setReadings(reading('s1', 10));
       await first.monitor.runCycle();
+      before.db.$client.close(); // the process ends
 
-      const restarted = setup(cfg, { history: (await store.load()).history, store });
+      const after = sqlite(join(dir, 'conductor.db'));
+      const restarted = setup(cfg, { history: new WateringHistory(after.load().history), store: after.store });
       restarted.setReadings(reading('s1', 10));
       const result = await restarted.monitor.runCycle();
+      after.db.$client.close();
 
       expect(first.bhyve.startWatering).toHaveBeenCalledOnce();
       expect(restarted.bhyve.startWatering).not.toHaveBeenCalled();
@@ -207,7 +234,7 @@ describe('Monitor.runCycle', () => {
   });
 
   it('in dry-run mode, reports what it would do but sends and records nothing', async () => {
-    const store = { save: vi.fn(async () => {}) };
+    const { store, rows } = sqlite();
     const t = setup(config([zone()], { dryRun: true }), { store });
     t.setReadings(reading('s1', 10));
 
@@ -216,7 +243,7 @@ describe('Monitor.runCycle', () => {
     expect(result.sent).toEqual([expect.objectContaining({ deviceId: 'dev1', waves: [[{ station: 1, runTime: 10 }]] })]);
     expect(t.bhyve.startWatering).not.toHaveBeenCalled();
     expect(t.history.runs).toEqual([]);
-    expect(store.save).not.toHaveBeenCalled();
+    for (const table of [tables.wateringSequence, tables.zoneWatering, tables.sensorReading, tables.zoneState, tables.openAlert]) expect(rows(table)).toBe(0);
     expect(info).toHaveBeenCalledWith('[dry run] would water device dev1: station 1 for 10 min');
   });
 
@@ -265,20 +292,24 @@ describe('Monitor.runCycle', () => {
     await expect(t.monitor.runCycle()).rejects.toThrow('tuya down');
   });
 
-  it('still reports success when saving the history fails', async () => {
-    const store = { save: vi.fn(async () => Promise.reject(new Error('disk full'))) };
-    const t = setup(config([zone()]), { store });
+  it('still waters, and reports it once, when the database cannot be written', async () => {
+    const { store, db } = sqlite();
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone()]), { store, audit });
+    db.$client.exec('PRAGMA query_only = ON'); // like a full or read-only disk
     t.setReadings(reading('s1', 10));
 
     const result = await t.monitor.runCycle();
 
     expect(result.sent).toHaveLength(1);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Could not save state'), expect.any(Error));
+    expect(error).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Could not save recordReadings; will retry'), expect.any(Error));
+    expect(audit.ofType('state.save_failed')).toEqual([expect.objectContaining({ step: 'recordReadings' })]);
   });
 
-  it('prunes old runs before saving', async () => {
+  it('keeps only the runs cooldowns and the daily cap can need in memory', async () => {
     const history = new WateringHistory([{ zoneKey: 'dev1:1', at: minutesAgo(3 * 24 * 60), minutes: 10 }]);
-    const t = setup(config([zone()]), { history, store: { save: async () => {} } });
+    const t = setup(config([zone()]), { history, store: sqlite().store });
     t.setReadings(reading('s1', 10));
 
     await t.monitor.runCycle();
@@ -470,7 +501,7 @@ describe('Monitor cycle-and-soak sequences', () => {
   });
 
   it('records each cycle in the history as it is sent, adding up to the planned total', async () => {
-    const store = { save: vi.fn(async () => {}) };
+    const { store, load } = sqlite();
     const t = setup(config([cyclingZone()]), { store });
     t.setReadings(reading('s1', 10));
 
@@ -485,11 +516,9 @@ describe('Monitor cycle-and-soak sequences', () => {
     ]);
     expect(t.history.minutesInLastDay('dev1:1', t.now())).toBeCloseTo(23.4);
     // the pending sequence is saved along with the history, ready to resume after a restart
-    expect(store.save).toHaveBeenLastCalledWith({
-      history: t.history,
-      sequences: [expect.objectContaining({ deviceId: 'dev1', nextWave: 2, attempts: 0 })],
-      alerts: expect.any(Object),
-    });
+    const saved = load(t.now());
+    expect(saved.sequences).toEqual([expect.objectContaining({ deviceId: 'dev1', nextWave: 2, attempts: 0 })]);
+    expect(saved.history).toEqual(t.history.runs);
   });
 
   it('does not start a new run for a device that is still soaking', async () => {
@@ -566,7 +595,7 @@ describe('Monitor cycle-and-soak sequences', () => {
   });
 
   it('stop() pauses pending cycles, keeping them saved to resume on restart', async () => {
-    const store = { save: vi.fn(async () => {}) };
+    const { store, load } = sqlite();
     const t = setup(config([cyclingZone()]), { store });
     t.setReadings(reading('s1', 10));
     await t.monitor.runCycle();
@@ -574,11 +603,7 @@ describe('Monitor cycle-and-soak sequences', () => {
     await t.monitor.stop();
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('1 unfinished watering sequence(s) (dev1); they resume on restart'));
-    expect(store.save).toHaveBeenLastCalledWith({
-      history: t.history,
-      sequences: [expect.objectContaining({ nextWave: 1 })],
-      alerts: expect.any(Object),
-    });
+    expect(load(t.now()).sequences).toEqual([expect.objectContaining({ nextWave: 1 })]);
     vi.advanceTimersByTime(10 * waveGap(11.7));
     await flush();
     expect(t.bhyve.startWatering).toHaveBeenCalledTimes(1);
@@ -837,6 +862,48 @@ describe('Monitor with a weather forecast', () => {
     expect(r.decisions[0]).toMatchObject({ action: 'skip', reason: 'rain-delay' });
     expect(t.bhyve.startWatering).not.toHaveBeenCalled();
   });
+  it('saves why it watered, including the forecast-based budget', async () => {
+    const { store, db } = sqlite();
+    const t = setup(config([forecastZone()], { forecastHours: 48 }), { weather: fakeWeather(), store });
+    t.setReadings(reading('s1', 25));
+
+    await t.monitor.runCycle();
+
+    const [why] = db.select().from(tables.sequenceZone).all();
+    expect(why).toMatchObject({ zoneKey: 'dev1:1', moisturePct: 25, thresholdPct: 30, targetPct: 40, requestedMinutes: 90, budgetInches: 1.5 });
+    expect(why?.budget).toMatchObject({ inches: 1.5, minutes: 90, summary: expect.stringContaining('refills to target') });
+    expect(why?.detail).toContain('apply 1.5in (90 min)');
+  });
+
+  describe('the wait for rain across a restart', () => {
+    const rainSoon = () => fakeWeather({ rainInHours: 2, rainInches: 0.5 });
+    /** Polls hourly for 4 hours (each time "rain in 2 hours"), then the conductor restarts `gapMinutes` later. */
+    const waitThenRestart = async (gapMinutes: number, restore: boolean) => {
+      const { store, load } = sqlite();
+      const cfg = config([forecastZone({ maxWaitHours: 6 })]);
+      const first = setup(cfg, { weather: rainSoon(), store });
+      first.setReadings(reading('s1', 29));
+      for (let hour = 0; hour <= 4; hour++) {
+        expect((await first.monitor.runCycle()).decisions[0]?.reason).toBe('forecast-covered');
+        if (hour < 4) first.advance(60);
+      }
+      const restartAt = new Date(first.now().getTime() + gapMinutes * 60_000);
+      const second = setup(cfg, { weather: rainSoon(), store, start: restartAt, ...(restore ? { zoneSpells: load(restartAt).zoneSpells } : {}) });
+      second.setReadings(reading('s1', 29, { at: restartAt }));
+      return (await second.monitor.runCycle()).decisions[0]?.reason;
+    };
+
+    it('counts the time waited before a quick restart against maxWaitHours', async () => {
+      // 4h10m waited + rain in 2h > 6h: water now, as an uninterrupted conductor would.
+      expect(await waitThenRestart(10, true)).toBe('dry');
+      // Without the saved spell it would start a fresh 6-hour wait.
+      expect(await waitThenRestart(10, false)).toBe('forecast-covered');
+    });
+
+    it('starts afresh after a longer gap, when the saved spell says nothing about now', async () => {
+      expect(await waitThenRestart(45, true)).toBe('forecast-covered'); // saved 45 min ago > 2 polls of 15 min
+    });
+  });
 });
 
 describe('Monitor: connection failures and recovery', () => {
@@ -1045,7 +1112,7 @@ describe('Monitor: health and safety alerts', () => {
   it('raises moisture, battery and "still dry" alerts from the poll and saves them', async () => {
     let t!: ReturnType<typeof setup>;
     const audit = new MemoryAuditLog(() => t.now());
-    const store = { save: vi.fn(async () => {}) };
+    const { store, load } = sqlite();
     t = setup(config([zone({ name: 'Front', cooldownMinutes: 0 })]), { audit, store });
     t.setReadings(reading('s1', 12, { batteryPct: 8 }));
 
@@ -1062,11 +1129,11 @@ describe('Monitor: health and safety alerts', () => {
       'moisture.critical_low',
       'zone.daily_limit_reached',
     ]);
-    expect(store.save).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        alerts: expect.objectContaining({ 'battery:sensor:s1': expect.anything(), 'moisture:dev1:1:s1': expect.anything(), 'daily-limit:dev1:1': expect.anything() }),
-      }),
-    );
+    expect(load(t.now()).alerts).toEqual({
+      'battery:sensor:s1': { state: 'low', since: NOW.toISOString() },
+      'daily-limit:dev1:1': { state: 'reached', since: new Date(NOW.getTime() + 180 * 60_000).toISOString() },
+      'moisture:dev1:1:s1': { state: 'low', since: NOW.toISOString() },
+    });
   });
 
   it('does not repeat alerts that were open before a restart', async () => {
@@ -1086,8 +1153,8 @@ describe('Monitor: health and safety alerts', () => {
     expect(audit.ofType('battery.low')).toEqual([]);
   });
 
-  it('a dry run records alerts but never writes the state file', async () => {
-    const store = { save: vi.fn(async () => {}) };
+  it('a dry run records alerts but never writes them to the database', async () => {
+    const { store, rows } = sqlite();
     const audit = new MemoryAuditLog(() => NOW);
     const t = setup(config([zone()], { dryRun: true }), { store, audit });
     t.setReadings(reading('s1', 5, { batteryPct: 3 }));
@@ -1095,7 +1162,7 @@ describe('Monitor: health and safety alerts', () => {
     await t.monitor.runCycle();
 
     expect(audit.ofType('battery.low')).toHaveLength(1);
-    expect(store.save).not.toHaveBeenCalled();
+    expect(rows(tables.openAlert)).toBe(0);
   });
 });
 
@@ -1127,5 +1194,139 @@ describe('Monitor: decision audit', () => {
       ['Front', 'cooldown'],
     ]);
     expect(audit.ofType('zone.decision')[2]).toMatchObject({ action: 'water', moisturePct: 25, minutes: 10, detail: expect.stringContaining('below 30%') });
+  });
+});
+
+describe('Monitor: what is saved', () => {
+  beforeEach(() => {
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  it('saves each sensor reading once, however often it is polled', async () => {
+    const { store, db } = sqlite();
+    const t = setup(config([zone()]), { store });
+    t.setReadings(reading('s1', 45, { batteryPct: 80, temperatureC: 21.5, at: minutesAgo(5) }));
+
+    await t.monitor.runCycle();
+    t.advance(15);
+    t.setReadings(reading('s1', 45, { batteryPct: 80, temperatureC: 21.5, at: minutesAgo(5) })); // the sensor hasn't reported again
+    await t.monitor.runCycle();
+    t.advance(15);
+    t.setReadings(reading('s1', 44, { at: t.now() }));
+    await t.monitor.runCycle();
+
+    expect(
+      db
+        .select({ at: tables.sensorReading.measuredAt, polled: tables.sensorReading.polledAt, pct: tables.sensorReading.moisturePct, battery: tables.sensorReading.batteryPct })
+        .from(tables.sensorReading)
+        .orderBy(tables.sensorReading.measuredAt)
+        .all(),
+    ).toEqual([
+      { at: minutesAgo(5), polled: NOW, pct: 45, battery: 80 },
+      { at: t.now(), polled: t.now(), pct: 44, battery: null },
+    ]);
+  });
+
+  it('saves every zone\'s dry spell and sensor blackout after each poll', async () => {
+    const { store, load } = sqlite();
+    const t = setup(config([zone({ sensorIds: ['s1'] }), zone({ station: 2, sensorIds: ['s2'] })]), { store });
+    t.setReadings(reading('s1', 10)); // zone 1 dry, zone 2 no data
+
+    await t.monitor.runCycle();
+    expect(load().zoneSpells).toEqual([
+      { zoneKey: 'dev1:1', drySince: NOW, evaluatedAt: NOW },
+      { zoneKey: 'dev1:2', noDataSince: NOW, evaluatedAt: NOW },
+    ]);
+
+    t.advance(15);
+    t.setReadings(reading('s1', 45, { at: t.now() }), reading('s2', 45, { at: t.now() }));
+    await t.monitor.runCycle();
+    expect(load(t.now()).zoneSpells).toEqual([
+      { zoneKey: 'dev1:1', evaluatedAt: t.now() },
+      { zoneKey: 'dev1:2', evaluatedAt: t.now() },
+    ]);
+  });
+
+  it('does not report a sensor blackout again after a quick restart, and times it from its start', async () => {
+    const { store, load } = sqlite();
+    const audit = new MemoryAuditLog(() => NOW);
+    const cfg = config([zone({ name: 'Front' })]);
+    const first = setup(cfg, { store, audit });
+    first.setReadings();
+    await first.monitor.runCycle(); // zone.no_data at NOW
+
+    const second = setup(cfg, { store, audit, zoneSpells: load(NOW).zoneSpells, start: minutesAgo(-20) });
+    second.setReadings();
+    await second.monitor.runCycle(); // still nothing: no second zone.no_data
+    second.advance(10);
+    second.setReadings(reading('s1', 45, { at: second.now() }));
+    await second.monitor.runCycle();
+
+    expect(audit.ofType('zone.no_data')).toHaveLength(1);
+    expect(audit.ofType('zone.data_restored')).toEqual([expect.objectContaining({ zone: 'dev1:1', outageMinutes: 30 })]);
+  });
+
+  it('ignores saved spells of zones that are no longer configured', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone()]), {
+      audit,
+      zoneSpells: [{ zoneKey: 'gone:9', noDataSince: minutesAgo(5), evaluatedAt: minutesAgo(5) }],
+    });
+    t.setReadings(reading('s1', 45));
+
+    await t.monitor.runCycle();
+
+    expect(audit.ofType('zone.data_restored')).toEqual([]);
+  });
+
+  it('records a heartbeat after every poll, successful or not', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const heartbeat = vi.fn();
+      const t = setup(config([zone()]), { heartbeat });
+      t.source.read.mockRejectedValueOnce(new Error('tuya down'));
+      t.setReadings(reading('s1', 45));
+
+      t.monitor.start();
+      await flush();
+      expect(heartbeat).toHaveBeenCalledTimes(1); // after the failed poll
+      vi.advanceTimersByTime(15 * 60_000);
+      await flush();
+      expect(heartbeat).toHaveBeenCalledTimes(2);
+
+      heartbeat.mockImplementation(() => {
+        throw new Error('database is locked');
+      });
+      vi.advanceTimersByTime(15 * 60_000);
+      await flush();
+      expect(t.source.read).toHaveBeenCalledTimes(3); // a failing heartbeat doesn't stop polling
+      vi.advanceTimersByTime(15 * 60_000);
+      await flush();
+      expect(t.source.read).toHaveBeenCalledTimes(4);
+      await t.monitor.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resumes a sequence the database kept, and finishes it there', async () => {
+    const { store, db, load } = sqlite();
+    const cfg = config([zone({ runMinutes: 20, maxCycleMinutes: 10, soakMinutes: 30 })]);
+    const first = setup(cfg, { store });
+    first.setReadings(reading('s1', 10));
+    await first.monitor.runCycle(); // cycle 1 of 2 sent; the process then dies
+
+    const second = setup(cfg, { store, pendingSequences: load(NOW).sequences, start: minutesAgo(-40) });
+    second.setReadings(reading('s1', 29, { at: second.now() }));
+    await second.monitor.resumePending();
+    await vi.waitFor(() => expect(second.bhyve.startWatering).toHaveBeenCalledOnce());
+    await second.monitor.drain();
+
+    expect(db.select({ status: tables.sequenceResult.status, cycles: tables.sequenceResult.cyclesDelivered }).from(tables.sequenceResult).all()).toEqual([
+      { status: 'completed', cycles: 2 },
+    ]);
+    expect(load(second.now()).history.map((r) => r.minutes)).toEqual([10, 10]);
   });
 });

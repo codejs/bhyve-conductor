@@ -1,80 +1,49 @@
-import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FileAuditLog, lastAuditEvent, MemoryAuditLog, parseAudit, readAudit } from '../../audit/audit.ts';
+import { MemoryAuditLog, parseAudit, readAudit, toJsonData } from '../../audit/audit.ts';
 import { ConnectionHealth } from '../../audit/health.ts';
 import { log } from '../../log.ts';
 
-describe('FileAuditLog', () => {
+describe('readAudit', () => {
   let dir: string;
-  let path: string;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'conductor-audit-'));
-    path = join(dir, 'audit.jsonl');
   });
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('appends one JSON line per event, in order, with a timestamp', async () => {
-    const audit = new FileAuditLog(path, () => new Date('2026-07-01T12:00:00Z'));
+  it('reads a JSON Lines trail (simulations, versions before the database)', async () => {
+    const path = join(dir, 'audit.jsonl');
+    await writeFile(path, '{"ts":"2026-06-30T00:00:00.000Z","type":"service.started"}\n{"ts":"2026-06-30T01:00:00.000Z","type":"service.stopped","reason":"SIGTERM"}\n');
 
-    for (let i = 0; i < 20; i++) audit.record('wave.sent', { cycle: i });
-    await audit.flush();
-
-    const lines = (await readFile(path, 'utf8')).trim().split('\n');
-    expect(lines).toHaveLength(20);
-    expect(JSON.parse(lines[0] ?? '')).toEqual({ ts: '2026-07-01T12:00:00.000Z', type: 'wave.sent', cycle: 0 });
-    expect(lines.map((l) => (JSON.parse(l) as { cycle: number }).cycle)).toEqual([...Array(20).keys()]);
+    expect(await readAudit(path)).toEqual({
+      events: [
+        { ts: '2026-06-30T00:00:00.000Z', type: 'service.started' },
+        { ts: '2026-06-30T01:00:00.000Z', type: 'service.stopped', reason: 'SIGTERM' },
+      ],
+      skipped: 0,
+    });
   });
 
-  it('keeps existing events (append-only)', async () => {
-    await writeFile(path, '{"ts":"2026-06-30T00:00:00.000Z","type":"service.started"}\n');
-    const audit = new FileAuditLog(path);
-
-    audit.record('service.stopped', { reason: 'SIGTERM' });
-    await audit.flush();
-
-    expect((await readAudit(path)).events.map((e) => e.type)).toEqual(['service.started', 'service.stopped']);
-  });
-
-  it('stores error messages and dates readably', async () => {
-    const audit = new FileAuditLog(path);
-    audit.record('poll.failed', { error: new Error('boom'), at: new Date('2026-07-01T00:00:00Z') });
-    await audit.flush();
-
-    expect((await readAudit(path)).events[0]).toMatchObject({ error: 'boom', at: '2026-07-01T00:00:00.000Z' });
-  });
-
-  it('logs but never throws when the file cannot be written', async () => {
-    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
-    const audit = new FileAuditLog(join(dir, 'missing-dir', 'audit.jsonl'));
-
-    expect(() => audit.record('service.started')).not.toThrow();
-    await audit.flush();
-
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Could not write audit event service.started'), expect.anything());
-    // ...and keeps working afterwards
-    const ok = new FileAuditLog(path);
-    ok.record('service.started');
-    await ok.flush();
-    expect((await readAudit(path)).events).toHaveLength(1);
-  });
-
-  it('finds the last event from the tail of a large file', async () => {
-    const filler = `${JSON.stringify({ ts: '2026-07-01T00:00:00.000Z', type: 'wave.sent', pad: 'x'.repeat(200) })}\n`.repeat(1000);
-    await writeFile(path, filler);
-    await appendFile(path, '{"ts":"2026-07-02T00:00:00.000Z","type":"service.stopped"}\n');
-
-    await expect(lastAuditEvent(path, 4096)).resolves.toMatchObject({ type: 'service.stopped' });
-  });
-
-  it('has no last event when there is no file', async () => {
-    await expect(lastAuditEvent(join(dir, 'none.jsonl'))).resolves.toBeUndefined();
+  it('has no events when there is no file, and fails on anything else it cannot read', async () => {
     await expect(readAudit(join(dir, 'none.jsonl'))).resolves.toEqual({ events: [], skipped: 0 });
+    await expect(readAudit(dir)).rejects.toThrow(); // a directory
+  });
+});
+
+describe('toJsonData', () => {
+  it('keeps error messages and dates readable, and nothing but JSON', () => {
+    expect(toJsonData({ error: new Error('boom'), at: new Date('2026-07-01T00:00:00Z'), n: 1, skip: undefined, nested: { ok: true } })).toEqual({
+      error: 'boom',
+      at: '2026-07-01T00:00:00.000Z',
+      n: 1,
+      nested: { ok: true },
+    });
   });
 });
 

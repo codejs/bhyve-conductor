@@ -12,8 +12,9 @@
  *  - Durations are REAL minutes, as in the code (cycles can be 2.5 min).
  *  - Zone key = "<deviceId>:<station>" (conductor/config.ts zoneKey()).
  *
- * Not expressible here, so kept in a hand-written migration (drizzle/*_append_only_triggers):
- * the triggers that make `zone_watering` and `audit_event` append-only.
+ * Views and triggers are owned by the app (src/db/repeatable.ts), not by migrations: they hold no data,
+ * and drizzle-kit's table rebuilds would break on views and silently drop triggers. The views are declared
+ * below with `.existing()`, so queries are typed but drizzle-kit leaves them alone.
  */
 import { sql, type SQL } from 'drizzle-orm';
 import {
@@ -455,7 +456,7 @@ export const sensorReading = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------------------------------
-// Views
+// Views (definitions in repeatable.ts; the columns here must match them, which a test checks)
 // ---------------------------------------------------------------------------------------------------
 
 /**
@@ -475,24 +476,7 @@ export const pendingSequence = sqliteView('pending_sequence', {
   inFlightWave: integer('in_flight_wave'),
   inFlightSince: isoTimestamp('in_flight_since'),
   zoneNames: text('zone_names', { mode: 'json' }).$type<string[]>().notNull(),
-}).as(sql`
-SELECT s.id,
-       s.device_id,
-       s.soak_minutes,
-       s.created_at,
-       (SELECT count(*) FROM sequence_wave c WHERE c.sequence_id = s.id) AS wave_count,
-       coalesce(w.wave_index, (SELECT count(*) FROM sequence_wave c WHERE c.sequence_id = s.id)) AS next_wave,
-       w.due_at,
-       coalesce(w.failed_attempts, 0) AS attempts,
-       CASE WHEN w.status = 'sending' THEN w.wave_index END AS in_flight_wave,
-       CASE WHEN w.status = 'sending' THEN w.sent_at END AS in_flight_since,
-       (SELECT json_group_array(z.zone_name) FROM sequence_zone z WHERE z.sequence_id = s.id) AS zone_names
-FROM watering_sequence s
-LEFT JOIN sequence_wave w
-       ON w.sequence_id = s.id
-      AND w.wave_index = (SELECT min(x.wave_index) FROM sequence_wave x
-                          WHERE x.sequence_id = s.id AND x.status IN ('pending', 'sending'))
-WHERE s.status = 'active'`);
+}).existing();
 
 /** One line per sequence: what was planned vs. what happened (`npm run audit:summary`, reports). */
 export const sequenceResult = sqliteView('sequence_result', {
@@ -511,28 +495,7 @@ export const sequenceResult = sqliteView('sequence_result', {
   failedAttempts: integer('failed_attempts').notNull(),
   /** When the water went off (the code's `sequence.finished`, which isn't persisted otherwise). */
   waterOffAt: isoTimestamp('water_off_at'),
-}).as(sql`
-SELECT s.id,
-       s.device_id,
-       s.created_at,
-       s.status,
-       s.ended_at,
-       s.abandon_reason,
-       count(DISTINCT w.wave_index) AS cycles,
-       count(DISTINCT CASE WHEN w.status = 'delivered' THEN w.wave_index END) AS cycles_delivered,
-       round(sum(st.run_minutes), 1) AS planned_minutes,
-       round(coalesce(sum(CASE WHEN w.status = 'delivered' THEN st.run_minutes END), 0), 1) AS delivered_minutes,
-       sum(CASE WHEN w.delivery IN ('unconfirmed', 'assumed') THEN 1 ELSE 0 END) AS uncertain_station_runs,
-       (SELECT sum(r.failed_attempts) FROM sequence_wave r WHERE r.sequence_id = s.id) AS failed_attempts,
-       (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(julianday(d.sent_at) + m.minutes / 1440.0))
-          FROM sequence_wave d
-          JOIN (SELECT ws.wave_index, sum(ws.run_minutes) AS minutes FROM wave_station ws
-                WHERE ws.sequence_id = s.id GROUP BY ws.wave_index) m ON m.wave_index = d.wave_index
-         WHERE d.sequence_id = s.id AND d.status = 'delivered') AS water_off_at
-FROM watering_sequence s
-JOIN sequence_wave w ON w.sequence_id = s.id
-JOIN wave_station st ON st.sequence_id = w.sequence_id AND st.wave_index = w.wave_index
-GROUP BY s.id`);
+}).existing();
 
 // ---------------------------------------------------------------------------------------------------
 // Row types

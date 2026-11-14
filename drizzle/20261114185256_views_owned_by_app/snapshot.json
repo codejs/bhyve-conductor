@@ -1,0 +1,1548 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "634b6524-baf9-4252-b7ea-722ac6afacde",
+  "prevIds": [
+    "185d00e8-a67f-42d2-ac35-669813dc8d01"
+  ],
+  "ddl": [
+    {
+      "name": "audit_event",
+      "entityType": "tables"
+    },
+    {
+      "name": "open_alert",
+      "entityType": "tables"
+    },
+    {
+      "name": "sensor_reading",
+      "entityType": "tables"
+    },
+    {
+      "name": "sequence_wave",
+      "entityType": "tables"
+    },
+    {
+      "name": "sequence_zone",
+      "entityType": "tables"
+    },
+    {
+      "name": "service_run",
+      "entityType": "tables"
+    },
+    {
+      "name": "watering_sequence",
+      "entityType": "tables"
+    },
+    {
+      "name": "wave_station",
+      "entityType": "tables"
+    },
+    {
+      "name": "zone",
+      "entityType": "tables"
+    },
+    {
+      "name": "zone_state",
+      "entityType": "tables"
+    },
+    {
+      "name": "zone_watering",
+      "entityType": "tables"
+    },
+    {
+      "table": "audit_event",
+      "name": "id",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "ts",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "type",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "service_run_id",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "data",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'{}'",
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "device_id",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": {
+        "as": "(CAST(json_extract(data, '$.device') AS TEXT))",
+        "type": "virtual"
+      },
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "zone_key",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": {
+        "as": "(CAST(json_extract(data, '$.zone') AS TEXT))",
+        "type": "virtual"
+      },
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "sequence_id",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": {
+        "as": "(CAST(json_extract(data, '$.sequence') AS TEXT))",
+        "type": "virtual"
+      },
+      "entityType": "columns"
+    },
+    {
+      "table": "open_alert",
+      "name": "alert_key",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "open_alert",
+      "name": "kind",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": {
+        "as": "(substr(alert_key, 1, instr(alert_key, ':') - 1))",
+        "type": "virtual"
+      },
+      "entityType": "columns"
+    },
+    {
+      "table": "open_alert",
+      "name": "state",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "open_alert",
+      "name": "since",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "sensor_id",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "measured_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "polled_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "moisture_pct",
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "temperature_c",
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "battery_pct",
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "online",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_id",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "wave_index",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "status",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'pending'",
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "due_at",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sent_at",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "delivery",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "failed_attempts",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "sequence_id",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "zone_key",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "zone_name",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "moisture_pct",
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "reading_at",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "threshold_pct",
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "target_pct",
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "requested_minutes",
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "allowance_minutes",
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "budget_inches",
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "budget_json",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "detail",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "id",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "started_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "mode",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "dry_run",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "pid",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "config_hash",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "config_json",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "heartbeat_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "stopped_at",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "service_run",
+      "name": "stop_reason",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "id",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "service_run_id",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "device_id",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "soak_minutes",
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "created_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "status",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'active'",
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "ended_at",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "abandon_reason",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "wave_station",
+      "name": "sequence_id",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "wave_station",
+      "name": "wave_index",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "wave_station",
+      "name": "station",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "wave_station",
+      "name": "run_minutes",
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone",
+      "name": "zone_key",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone",
+      "name": "device_id",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone",
+      "name": "station",
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone",
+      "name": "name",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone",
+      "name": "first_seen_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone",
+      "name": "last_seen_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_state",
+      "name": "zone_key",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_state",
+      "name": "dry_since",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_state",
+      "name": "no_data_since",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_state",
+      "name": "evaluated_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_watering",
+      "name": "id",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_key",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_watering",
+      "name": "started_at",
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_watering",
+      "name": "minutes",
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_watering",
+      "name": "sequence_id",
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "zone_watering",
+      "name": "wave_index",
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "entityType": "columns"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_ts",
+      "columns": [
+        {
+          "value": "ts",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_type_ts",
+      "columns": [
+        {
+          "value": "type",
+          "isExpression": false
+        },
+        {
+          "value": "ts",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_device",
+      "columns": [
+        {
+          "value": "device_id",
+          "isExpression": false
+        },
+        {
+          "value": "ts",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "\"audit_event\".\"device_id\" IS NOT NULL",
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_zone",
+      "columns": [
+        {
+          "value": "zone_key",
+          "isExpression": false
+        },
+        {
+          "value": "ts",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "\"audit_event\".\"zone_key\" IS NOT NULL",
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_sequence",
+      "columns": [
+        {
+          "value": "sequence_id",
+          "isExpression": false
+        },
+        {
+          "value": "ts",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "\"audit_event\".\"sequence_id\" IS NOT NULL",
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "sequence_zone_zone",
+      "columns": [
+        {
+          "value": "zone_key",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_one_active_per_device",
+      "columns": [
+        {
+          "value": "device_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"watering_sequence\".\"status\" = 'active'",
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_created",
+      "columns": [
+        {
+          "value": "created_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_device_created",
+      "columns": [
+        {
+          "value": "device_id",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_watering_zone_time",
+      "columns": [
+        {
+          "value": "zone_key",
+          "isExpression": false
+        },
+        {
+          "value": "started_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "entityType": "indexes"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "fk_sequence_wave_sequence_id_watering_sequence_id_fk",
+      "columns": [
+        "sequence_id"
+      ],
+      "tableTo": "watering_sequence",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "fk_sequence_zone_sequence_id_watering_sequence_id_fk",
+      "columns": [
+        "sequence_id"
+      ],
+      "tableTo": "watering_sequence",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "fk_sequence_zone_zone_key_zone_zone_key_fk",
+      "columns": [
+        "zone_key"
+      ],
+      "tableTo": "zone",
+      "columnsTo": [
+        "zone_key"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "fk_watering_sequence_service_run_id_service_run_id_fk",
+      "columns": [
+        "service_run_id"
+      ],
+      "tableTo": "service_run",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "wave_station",
+      "name": "fk_wave_station_sequence_id_wave_index_sequence_wave_sequence_id_wave_index_fk",
+      "columns": [
+        "sequence_id",
+        "wave_index"
+      ],
+      "tableTo": "sequence_wave",
+      "columnsTo": [
+        "sequence_id",
+        "wave_index"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "zone_state",
+      "name": "fk_zone_state_zone_key_zone_zone_key_fk",
+      "columns": [
+        "zone_key"
+      ],
+      "tableTo": "zone",
+      "columnsTo": [
+        "zone_key"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "zone_watering",
+      "name": "fk_zone_watering_zone_key_zone_zone_key_fk",
+      "columns": [
+        "zone_key"
+      ],
+      "tableTo": "zone",
+      "columnsTo": [
+        "zone_key"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "zone_watering",
+      "name": "fk_zone_watering_sequence_id_wave_index_sequence_wave_sequence_id_wave_index_fk",
+      "columns": [
+        "sequence_id",
+        "wave_index"
+      ],
+      "tableTo": "sequence_wave",
+      "columnsTo": [
+        "sequence_id",
+        "wave_index"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "nameExplicit": false,
+      "entityType": "fks"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "sensor_reading_pk",
+      "columns": [
+        "sensor_id",
+        "measured_at"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_pk",
+      "columns": [
+        "sequence_id",
+        "wave_index"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "sequence_zone_pk",
+      "columns": [
+        "sequence_id",
+        "zone_key"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "wave_station",
+      "name": "wave_station_pk",
+      "columns": [
+        "sequence_id",
+        "wave_index",
+        "station"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_pk",
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "open_alert",
+      "name": "open_alert_pk",
+      "columns": [
+        "alert_key"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_pk",
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_pk",
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_pk",
+      "columns": [
+        "zone_key"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "zone_state",
+      "name": "zone_state_pk",
+      "columns": [
+        "zone_key"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_watering_pk",
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_device_station",
+      "columns": [
+        "device_id",
+        "station"
+      ],
+      "nameExplicit": true,
+      "entityType": "uniques"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_watering_once_per_wave",
+      "columns": [
+        "sequence_id",
+        "wave_index",
+        "zone_key"
+      ],
+      "nameExplicit": true,
+      "entityType": "uniques"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_ts_iso",
+      "value": "\"ts\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "audit_event",
+      "name": "audit_event_data_json",
+      "value": "json_valid(\"data\")",
+      "entityType": "checks"
+    },
+    {
+      "table": "open_alert",
+      "name": "open_alert_key_not_null",
+      "value": "\"alert_key\" IS NOT NULL",
+      "entityType": "checks"
+    },
+    {
+      "table": "open_alert",
+      "name": "open_alert_kind",
+      "value": "\"kind\" IN ('battery', 'moisture', 'device', 'daily-limit')",
+      "entityType": "checks"
+    },
+    {
+      "table": "open_alert",
+      "name": "open_alert_state",
+      "value": "\"state\" IN ('low', 'high', 'offline', 'reached')",
+      "entityType": "checks"
+    },
+    {
+      "table": "open_alert",
+      "name": "open_alert_since_iso",
+      "value": "\"since\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "sensor_reading_online_bool",
+      "value": "\"online\" IN (0, 1)",
+      "entityType": "checks"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "sensor_reading_measured_at_iso",
+      "value": "\"measured_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "sensor_reading",
+      "name": "sensor_reading_polled_at_iso",
+      "value": "\"polled_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_index_nonnegative",
+      "value": "\"wave_index\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_attempts_nonnegative",
+      "value": "\"failed_attempts\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_status",
+      "value": "\"status\" IN ('pending', 'sending', 'delivered', 'skipped')",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_delivery",
+      "value": "\"delivery\" IN ('event', 'status', 'unconfirmed', 'assumed')",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_unsent_state",
+      "value": "\"status\" NOT IN ('pending', 'skipped') OR (\"sent_at\" IS NULL AND \"delivery\" IS NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_sending_state",
+      "value": "\"status\" <> 'sending' OR (\"sent_at\" IS NOT NULL AND \"delivery\" IS NULL AND \"due_at\" IS NOT NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_delivered_state",
+      "value": "\"status\" <> 'delivered' OR (\"sent_at\" IS NOT NULL AND \"delivery\" IS NOT NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_due_at_iso",
+      "value": "\"due_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_wave",
+      "name": "sequence_wave_sent_at_iso",
+      "value": "\"sent_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "sequence_zone_requested_positive",
+      "value": "\"requested_minutes\" > 0",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "sequence_zone_budget_json",
+      "value": "\"budget_json\" IS NULL OR json_valid(\"budget_json\")",
+      "entityType": "checks"
+    },
+    {
+      "table": "sequence_zone",
+      "name": "sequence_zone_reading_at_iso",
+      "value": "\"reading_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_started_at_iso",
+      "value": "\"started_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_heartbeat_at_iso",
+      "value": "\"heartbeat_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_stopped_at_iso",
+      "value": "\"stopped_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_mode",
+      "value": "\"mode\" IN ('continuous', 'once')",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_dry_run_bool",
+      "value": "\"dry_run\" IN (0, 1)",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_config_json",
+      "value": "json_valid(\"config_json\")",
+      "entityType": "checks"
+    },
+    {
+      "table": "service_run",
+      "name": "service_run_stopped_pair",
+      "value": "(\"stopped_at\" IS NULL) = (\"stop_reason\" IS NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_id_not_null",
+      "value": "\"id\" IS NOT NULL",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_soak_nonnegative",
+      "value": "\"soak_minutes\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_status",
+      "value": "\"status\" IN ('active', 'completed', 'abandoned')",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_ended_iff_not_active",
+      "value": "(\"status\" = 'active') = (\"ended_at\" IS NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_reason_iff_abandoned",
+      "value": "(\"status\" = 'abandoned') = (\"abandon_reason\" IS NOT NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_created_at_iso",
+      "value": "\"created_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "watering_sequence",
+      "name": "watering_sequence_ended_at_iso",
+      "value": "\"ended_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "wave_station",
+      "name": "wave_station_station_positive",
+      "value": "\"station\" >= 1",
+      "entityType": "checks"
+    },
+    {
+      "table": "wave_station",
+      "name": "wave_station_run_minutes_range",
+      "value": "\"run_minutes\" > 0 AND \"run_minutes\" <= 240",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_key_not_null",
+      "value": "\"zone_key\" IS NOT NULL",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_station_positive",
+      "value": "\"station\" >= 1",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_key_matches",
+      "value": "\"zone_key\" = \"device_id\" || ':' || \"station\"",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_first_seen_at_iso",
+      "value": "\"first_seen_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone",
+      "name": "zone_last_seen_at_iso",
+      "value": "\"last_seen_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_state",
+      "name": "zone_state_key_not_null",
+      "value": "\"zone_key\" IS NOT NULL",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_state",
+      "name": "zone_state_dry_since_iso",
+      "value": "\"dry_since\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_state",
+      "name": "zone_state_no_data_since_iso",
+      "value": "\"no_data_since\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_state",
+      "name": "zone_state_evaluated_at_iso",
+      "value": "\"evaluated_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_watering_minutes_nonnegative",
+      "value": "\"minutes\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_watering_provenance_pair",
+      "value": "(\"sequence_id\" IS NULL) = (\"wave_index\" IS NULL)",
+      "entityType": "checks"
+    },
+    {
+      "table": "zone_watering",
+      "name": "zone_watering_started_at_iso",
+      "value": "\"started_at\" GLOB '????-??-??T??:??:??.???Z'",
+      "entityType": "checks"
+    },
+    {
+      "name": "pending_sequence",
+      "definition": null,
+      "isExisting": true,
+      "error": null,
+      "entityType": "views"
+    },
+    {
+      "name": "sequence_result",
+      "definition": null,
+      "isExisting": true,
+      "error": null,
+      "entityType": "views"
+    }
+  ],
+  "renames": []
+}

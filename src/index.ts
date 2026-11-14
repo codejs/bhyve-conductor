@@ -6,14 +6,20 @@
  *   npm run dev -- --dry-run    log decisions without sending commands
  *   npm run conductor:check     one dry-run cycle, then exit (good for checking the config)
  *   npm run audit               review what happened (watering, outages, recoveries)
+ *
+ * Everything is kept in one SQLite database (CONDUCTOR_DB): watering history and schedule, pending cycles,
+ * alerts and the audit trail. See docs/sqlite-storage.md.
  */
 import { parseArgs } from 'node:util';
-import { FileAuditLog, lastAuditEvent, teeAudit, type AuditSink } from './audit/audit.ts';
+import { teeAudit, type AuditSink } from './audit/audit.ts';
 import { BhyveClient } from './bhyve/client.ts';
 import { assertForecastReady, loadConductorConfig } from './conductor/config.ts';
+import { WateringHistory } from './conductor/history.ts';
 import { Monitor } from './conductor/monitor.ts';
-import { FileStateStore } from './conductor/state.ts';
 import { loadConfig } from './config.ts';
+import { openDatabase } from './db/database.ts';
+import { importLegacyFiles } from './db/legacy-import.ts';
+import { beginSession } from './db/session.ts';
 import { log } from './log.ts';
 import { TuyaSoilSource } from './sensors/tuya-soil.ts';
 import { DeliveryQueue } from './notify/queue.ts';
@@ -42,6 +48,7 @@ const main = async (): Promise<void> => {
     'CONDUCTOR_CONFIG',
     'CONDUCTOR_STATE',
     'CONDUCTOR_AUDIT',
+    'CONDUCTOR_DB',
     'LOCATION',
     'TELEGRAM_BOT_TOKEN',
     'TELEGRAM_CHAT_ID',
@@ -49,8 +56,22 @@ const main = async (): Promise<void> => {
   const config = await loadConductorConfig(env.CONDUCTOR_CONFIG);
   if (args['dry-run']) config.dryRun = true;
 
-  const auditFile = new FileAuditLog(env.CONDUCTOR_AUDIT);
-  let audit: AuditSink = auditFile;
+  // Creates or upgrades the database (backing it up first), and on the first run imports the files an
+  // earlier version kept. A dry run leaves them alone: it must not change what the real service sees.
+  const db = openDatabase(env.CONDUCTOR_DB);
+  const legacy = config.dryRun
+    ? undefined
+    : await importLegacyFiles(db, { statePath: env.CONDUCTOR_STATE, auditPath: env.CONDUCTOR_AUDIT }, config.zones, new Date());
+  const session = beginSession(db, {
+    config,
+    mode: args.once ? 'once' : 'continuous',
+    now: () => new Date(),
+    pid: process.pid,
+    ...(legacy?.lastAuditEvent ? { legacyLastEvent: legacy.lastAuditEvent } : {}),
+  });
+
+  const auditDb = session.audit;
+  let audit: AuditSink = auditDb;
   let notifier: Notifier | undefined;
   let queue: DeliveryQueue | undefined;
   if (Boolean(env.TELEGRAM_BOT_TOKEN) !== Boolean(env.TELEGRAM_CHAT_ID)) {
@@ -61,20 +82,30 @@ const main = async (): Promise<void> => {
       log.info('Dry run: Telegram notifications are off');
     } else {
       const telegram = new TelegramClient({ token: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID });
-      // Delivery failures go to the audit file only (not back through the notifier).
+      // Delivery failures go to the audit trail only (not back through the notifier).
       queue = new DeliveryQueue(telegram, {}, (drop) =>
-        auditFile.record('notification.failed', { error: drop.error, attempts: drop.attempts, message: drop.text.slice(0, 200) }),
+        auditDb.record('notification.failed', { error: drop.error, attempts: drop.attempts, message: drop.text.slice(0, 200) }),
       );
       const q = queue;
       notifier = new Notifier({ options: config.notifications, deliver: (n) => q.enqueue(n.text) });
-      audit = teeAudit(auditFile, notifier);
+      audit = teeAudit(auditDb, notifier);
       log.info(`Telegram notifications on (${config.notifications.minSeverity} and above)`);
     }
   }
-  const previous = await lastAuditEvent(env.CONDUCTOR_AUDIT).catch(() => undefined);
-  if (previous && previous.type !== 'service.stopped') {
-    log.warn(`The previous run did not shut down cleanly (last audit event: ${previous.type} at ${previous.ts})`);
-    audit.record('service.unclean_shutdown', { lastEvent: previous.type, lastEventAt: previous.ts });
+  if (legacy) {
+    audit.record('storage.imported', {
+      runs: legacy.runs,
+      sequences: legacy.sequences,
+      alerts: legacy.alerts,
+      auditEvents: legacy.auditEvents,
+      skipped: legacy.skipped,
+      files: legacy.renamed,
+    });
+  }
+  if (session.unclean) {
+    const { lastEvent, lastEventAt } = session.unclean;
+    log.warn(`The previous run did not shut down cleanly (last audit event: ${lastEvent} at ${lastEventAt})`);
+    audit.record('service.unclean_shutdown', { lastEvent, lastEventAt });
   }
   audit.record('service.started', { mode: args.once ? 'once' : 'continuous', dryRun: config.dryRun, zones: config.zones.length });
 
@@ -101,16 +132,17 @@ const main = async (): Promise<void> => {
     audit.record(state === 'connected' ? 'socket.connected' : 'socket.disconnected', code === undefined ? {} : { code }),
   );
 
-  const store = new FileStateStore(env.CONDUCTOR_STATE);
-  const state = await store.load();
+  const { state } = session;
   const monitor = new Monitor({
     config,
     source,
     bhyve,
-    history: state.history,
+    history: new WateringHistory(state.history),
     pendingSequences: state.sequences,
     alertState: state.alerts,
-    store,
+    zoneSpells: state.zoneSpells,
+    store: session.store,
+    heartbeat: session.heartbeat,
     audit,
     ...(weather ? { weather } : {}),
   });
@@ -119,11 +151,12 @@ const main = async (): Promise<void> => {
     await monitor.stop();
     bhyve.close();
     audit.record('service.stopped', { reason });
+    session.end(reason);
     notifier?.stop();
     // Give queued notifications a moment, but never let Telegram hold up a shutdown.
     if (queue) await Promise.race([queue.flush(), new Promise((r) => setTimeout(r, 10_000))]);
-    queue?.stop();
-    await auditFile.flush();
+    queue?.stop(); // drops are audited, so the database closes after this
+    db.$client.close();
   };
 
   let stopping = false;

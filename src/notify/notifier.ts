@@ -281,6 +281,8 @@ export class Notifier implements AuditSink {
           : undefined;
       case 'state.save_failed':
         return { severity: 'critical', text: `💾 <b>Can’t save state</b>: ${str(e.error)}\nCooldowns and pending cycles won’t survive a restart.` };
+      case 'state.save_restored':
+        return { severity: 'info', text: `💾 Saving state works again after ${duration(e.outageMinutes)} (${str(e.failures)} failed saves)` };
       default:
         return undefined;
     }

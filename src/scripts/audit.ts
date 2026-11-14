@@ -9,13 +9,15 @@
  *   npm run audit -- --device <deviceId>           one B-hyve device
  *   npm run audit -- --type connection,socket      by event type (prefixes)
  *   npm run audit -- --since 2026-07-01T06:00 --until 2026-07-01T12:00
+ *   npm run audit -- --sequence 3f9a1c2e           (the first characters of a sequence id are enough)
  *   npm run audit -- --json                        raw JSON lines (for jq, spreadsheets, ...)
- *   npm run audit -- --file /path/to/audit.jsonl   another file (default: CONDUCTOR_AUDIT)
+ *   npm run audit -- --file other.db               another database (default: CONDUCTOR_DB), read-only
+ *   npm run audit -- --file trail.audit.jsonl      a JSON Lines trail (simulations, versions before the database)
  */
 import { parseArgs } from 'node:util';
-import { readAudit } from '../audit/audit.ts';
 import { filterEvents, formatEvent, formatSummary, parseSince, summarize, type AuditFilter } from '../audit/report.ts';
 import { loadConfig } from '../config.ts';
+import { readAuditSource } from '../db/audit-log.ts';
 
 const { values } = parseArgs({
   options: {
@@ -34,8 +36,7 @@ const { values } = parseArgs({
 });
 
 const now = new Date();
-const file = values.file ?? loadConfig(['CONDUCTOR_AUDIT']).CONDUCTOR_AUDIT;
-const { events, skipped } = await readAudit(file);
+const file = values.file ?? loadConfig(['CONDUCTOR_DB']).CONDUCTOR_DB;
 
 const filter: AuditFilter = {
   // A sequence id is specific enough on its own; don't hide its early events behind --since.
@@ -47,6 +48,7 @@ const filter: AuditFilter = {
   ...(values.sequence ? { sequence: values.sequence } : {}),
   recovery: values.recovery,
 };
+const { events, skipped } = await readAuditSource(file, filter);
 const selected = filterEvents(events, filter);
 
 if (values.json) {

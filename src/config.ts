@@ -38,12 +38,12 @@ const EnvSchema = z.object({
 
   /** Sensor → zone mapping and watering rules (see conductor.example.json). */
   CONDUCTOR_CONFIG: z.string().min(1).default('conductor.json'),
-  /** Where recent supplemental runs are remembered, so cooldowns survive restarts. */
-  CONDUCTOR_STATE: z.string().min(1).default('.conductor-state.json'),
-  /** Append-only audit trail of watering and connectivity events (review with `npm run audit`). */
-  CONDUCTOR_AUDIT: z.string().min(1).default('.conductor-audit.jsonl'),
-  /** SQLite database (see docs/sqlite-storage.md); `npm run db:migrate` creates or upgrades it. */
+  /** SQLite database: watering history and schedule, pending cycles, alerts, audit trail (docs/sqlite-storage.md). */
   CONDUCTOR_DB: z.string().min(1).default('.conductor.db'),
+  /** State file of versions before the database; imported into it once, then renamed to *.imported. */
+  CONDUCTOR_STATE: z.string().min(1).default('.conductor-state.json'),
+  /** JSONL audit trail of versions before the database; imported into it once, then renamed to *.imported. */
+  CONDUCTOR_AUDIT: z.string().min(1).default('.conductor-audit.jsonl'),
 
   /** Telegram notifications (optional): the bot token from @BotFather and the chat to post to. */
   TELEGRAM_BOT_TOKEN: blankAsUnset(z.string().regex(/^\d+:[\w-]{20,}$/, 'expected a bot token like 123456789:AA...').optional()),

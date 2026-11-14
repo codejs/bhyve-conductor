@@ -54,6 +54,25 @@ describe('every scenario', () => {
     for (const n of run(id).notifications) expect(Date.parse(n.sentAt)).toBeGreaterThanOrEqual(Date.parse(n.ts));
   });
 
+  it.each(SCENARIOS.map((s) => s.id))('%s: the database agrees with the audit trail', (id) => {
+    const r = run(id);
+    const audited = summarize(r.events).sequences;
+    const stored = r.stored.sequences;
+
+    // Every sequence is finished in the database too, with the same outcome and amount.
+    expect(stored.map((q) => q.id).sort()).toEqual(audited.map((q) => q.sequence).sort());
+    for (const q of audited) {
+      const row = stored.find((s) => s.id === q.sequence);
+      expect(row?.status, q.sequence).toBe(q.status);
+      expect(row?.deliveredMinutes, q.sequence).toBe(q.deliveredMinutes ?? 0);
+    }
+    // Each delivered cycle once; the ledger adds up to what was delivered.
+    const deliveredCycles = r.events.filter((e) => ['wave.confirmed', 'wave.unconfirmed', 'wave.assumed_delivered'].includes(e.type)).length;
+    expect(stored.reduce((sum, q) => sum + q.cyclesDelivered, 0)).toBe(deliveredCycles);
+    const ledgerMinutes = r.stored.ledger.reduce((sum, l) => sum + l.minutes, 0);
+    expect(ledgerMinutes).toBeCloseTo(stored.reduce((sum, q) => sum + q.deliveredMinutes, 0), 6);
+  });
+
   it('every scenario is listed once', () => {
     expect(new Set(SCENARIOS.map((s) => s.id)).size).toBe(SCENARIOS.length);
     expect(scenarioById('crash-mid-soak')?.title).toContain('crash');
@@ -117,6 +136,8 @@ describe('scenario expectations', () => {
     expect(ofType(r, 'service.unclean_shutdown')[0]).toMatchObject({ lastEvent: 'wave.confirmed' });
     expect(ofType(r, 'sequence.resumed')[0]).toMatchObject({ nextCycle: 3 });
     expect(ofType(r, 'wave.confirmed').map((e) => hhmm(e.ts))).toEqual(['06:00', '06:28', '06:56']);
+    // The database carried the sequence over the crash and recorded its end.
+    expect(r.stored.sequences).toEqual([expect.objectContaining({ status: 'completed', cycles: 3, cyclesDelivered: 3, deliveredMinutes: 24 })]);
     // the crash message says it's back; no separate "started" message right after it
     expect(notified(r)).toEqual(['service.started', 'sequence.started', 'service.unclean_shutdown', 'sequence.resumed', 'sequence.finished']);
   });

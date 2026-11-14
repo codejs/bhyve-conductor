@@ -8,8 +8,9 @@ import type { BhyveEvent, StationRun } from '../bhyve/types.ts';
 import { log } from '../log.ts';
 import { zoneKey, type RecoveryOptions } from './config.ts';
 import type { WateringHistory } from './history.ts';
-import type { DeviceCommand } from './plan.ts';
+import type { DeviceCommand, ZoneDecision } from './plan.ts';
 import type { PendingSequence } from './state.ts';
+import { noStore, type SequenceJournal, type SequenceZone, type WaveDelivery } from './store.ts';
 
 /**
  * Runs watering sequences (one or more cycle-and-soak waves per device) so that they survive
@@ -23,8 +24,9 @@ import type { PendingSequence } from './state.ts';
  *    abandoned (the owner intervened); offline, busy or unreadable → retried.
  *  - Retries back off (1, 2, 5, 10 min...) until `retryWindowMinutes` after the wave was due; then the
  *    rest of the sequence is abandoned and the zone is re-evaluated by the normal monitoring.
- *  - Progress is saved after every step. After a restart, sequences resume if their next wave was due
- *    within `resumeWindowMinutes`; a wave found mid-send is counted as delivered.
+ *  - Every step is saved as it happens (SequenceJournal), the in-flight marker before the command is
+ *    sent. After a restart, sequences resume if their next wave was due within `resumeWindowMinutes`; a
+ *    wave found mid-send is counted as delivered.
  */
 
 export type SequencerBhyve = Pick<BhyveClient, 'startWatering' | 'getDevice' | 'onEvent'>;
@@ -44,8 +46,8 @@ export interface SequencerDeps {
   history: WateringHistory;
   audit: AuditSink;
   health: ConnectionHealth;
-  /** Persists history + pending sequences; called after every step. */
-  save: () => Promise<void>;
+  /** Where each step is saved (default: nowhere). Expected not to throw (see guardStore). */
+  store?: SequenceJournal;
   options: RecoveryOptions;
   now: () => Date;
   /** Timers (default: the system's). */
@@ -60,6 +62,7 @@ const round1 = (n: number): number => Math.round(n * 10) / 10;
 
 export class Sequencer {
   readonly #deps: SequencerDeps;
+  readonly #store: SequenceJournal;
   readonly #active = new Map<string, { seq: PendingSequence; timer?: TimerHandle }>();
   readonly #clock: Clock;
   #drainWaiters: (() => void)[] = [];
@@ -69,6 +72,7 @@ export class Sequencer {
 
   constructor(deps: SequencerDeps) {
     this.#deps = deps;
+    this.#store = deps.store ?? noStore;
     this.#clock = deps.clock ?? systemClock;
   }
 
@@ -87,8 +91,11 @@ export class Sequencer {
     return seq ? `cycle ${seq.nextWave + 1}/${seq.waves.length}` : '';
   }
 
-  /** Starts a sequence and makes the first attempt at its first wave (the caller has just checked the device). */
-  async start(command: DeviceCommand, details: Record<string, unknown> = {}): Promise<StartResult> {
+  /**
+   * Starts a sequence and makes the first attempt at its first wave (the caller has just checked the device).
+   * `details` go into the `sequence.started` audit event; `decisions` are saved as the reason for each zone.
+   */
+  async start(command: DeviceCommand, details: Record<string, unknown> = {}, decisions: readonly ZoneDecision[] = []): Promise<StartResult> {
     if (this.#active.has(command.deviceId)) {
       // Only possible if a poll that was given up on by the watchdog wakes up late; never run two at once.
       log.warn(`Not starting a second watering sequence on device ${command.deviceId}: one is already running`);
@@ -96,7 +103,8 @@ export class Sequencer {
     }
     const now = this.#deps.now();
     const seq: PendingSequence = {
-      id: randomUUID().slice(0, 8),
+      // A full UUID: ids are kept forever in the database (messages show the first 8 characters).
+      id: randomUUID(),
       deviceId: command.deviceId,
       waves: command.waves,
       soakMinutes: command.soakMinutes,
@@ -116,6 +124,7 @@ export class Sequencer {
       plannedMinutes: round1(seq.waves.reduce((sum, w) => sum + minutesOf(w), 0)),
       ...details,
     });
+    this.#store.sequenceStarted(seq, zonesOf(command, decisions));
     return this.#attempt(seq, false);
   }
 
@@ -142,12 +151,11 @@ export class Sequencer {
           sentAt: since.toISOString(),
           reason: 'found in flight after a restart',
         });
-        this.#recordDelivered(seq, wave, since);
+        this.#recordDelivered(seq, index, since, 'assumed');
         if (seq.nextWave >= seq.waves.length) {
           this.#complete(seq);
           continue;
         }
-        seq.dueAt = new Date(since.getTime() + (minutesOf(wave) + seq.soakMinutes) * MINUTE_MS);
       }
 
       const overdueMin = (now.getTime() - seq.dueAt.getTime()) / MINUTE_MS;
@@ -166,7 +174,6 @@ export class Sequencer {
       log.info(`Resuming watering sequence ${seq.id} on device ${seq.deviceId} at cycle ${seq.nextWave + 1}/${seq.waves.length}`);
       this.#schedule(seq, Math.max(0, seq.dueAt.getTime() - now.getTime()));
     }
-    await this.#save();
   }
 
   /** Resolves when no sequence is running (--once uses it to let the last cycles finish). */
@@ -203,7 +210,6 @@ export class Sequencer {
       if (!check.go) {
         if (check.abandon) {
           this.#abandon(seq, check.reason);
-          await this.#save();
           return 'abandoned';
         }
         audit.record('wave.deferred', { ...cycle, reason: check.reason });
@@ -211,10 +217,10 @@ export class Sequencer {
       }
     }
 
-    // Mark the wave in flight *before* sending, so a crash from here on is detectable at restart.
+    // Mark the wave in flight *before* sending (saved synchronously), so a crash from here on is detectable at restart.
     const sentAt = this.#deps.now();
     seq.inFlight = { wave: index, since: sentAt };
-    await this.#save();
+    this.#store.waveSending(seq, index, sentAt);
 
     let acknowledged = false;
     let onAck: () => void = () => {};
@@ -260,17 +266,14 @@ export class Sequencer {
         audit.record('wave.confirmed', { ...cycle, via: delivery });
       }
       log.info(`Watering device ${seq.deviceId} (${this.#label(seq)}): ${summary(wave)}`);
-      this.#recordDelivered(seq, wave, sentAt);
+      this.#recordDelivered(seq, index, sentAt, delivery === 'unknown' ? 'unconfirmed' : delivery);
 
       if (seq.nextWave >= seq.waves.length) {
         this.#complete(seq);
         this.#scheduleFinished(seq, minutesOf(wave) * MINUTE_MS);
       } else {
-        // The wave's stations run back to back; the next wave starts after they finish plus the soak.
-        seq.dueAt = new Date(sentAt.getTime() + (minutesOf(wave) + seq.soakMinutes) * MINUTE_MS);
         this.#schedule(seq, seq.dueAt.getTime() - this.#deps.now().getTime());
       }
-      await this.#save();
       return 'delivered';
     } finally {
       unsubscribe();
@@ -350,12 +353,12 @@ export class Sequencer {
 
   async #retryOrAbandon(seq: PendingSequence, reason: string): Promise<StartResult> {
     seq.attempts++;
+    this.#store.waveFailed(seq, seq.nextWave);
     const now = this.#deps.now();
     const overdueMin = (now.getTime() - seq.dueAt.getTime()) / MINUTE_MS;
     const windowMin = this.#deps.options.retryWindowMinutes;
     if (overdueMin >= windowMin) {
       this.#abandon(seq, `gave up on ${this.#label(seq)} after ${seq.attempts} attempt(s) over ${Math.round(overdueMin)} min: ${reason}`);
-      await this.#save();
       return 'abandoned';
     }
     const backoff = RETRY_DELAYS_MINUTES[Math.min(seq.attempts, RETRY_DELAYS_MINUTES.length) - 1] ?? 1;
@@ -371,7 +374,6 @@ export class Sequencer {
       reason,
     });
     this.#schedule(seq, delayMin * MINUTE_MS);
-    await this.#save();
     return 'retrying';
   }
 
@@ -385,13 +387,19 @@ export class Sequencer {
     }, Math.max(0, delayMs));
   }
 
-  #recordDelivered(seq: PendingSequence, wave: readonly StationRun[], at: Date): void {
+  /** Counts wave `index` (sent at `at`) as delivered; the next wave is due when it has run plus the soak. */
+  #recordDelivered(seq: PendingSequence, index: number, at: Date, delivery: WaveDelivery): void {
+    const wave = seq.waves[index] ?? [];
     for (const run of wave) {
       this.#deps.history.record({ zoneKey: zoneKey({ deviceId: seq.deviceId, station: run.station }), at, minutes: run.runTime });
     }
+    // The wave's stations run back to back; the next wave starts after they finish plus the soak.
+    const nextDueAt = index + 1 < seq.waves.length ? new Date(at.getTime() + (minutesOf(wave) + seq.soakMinutes) * MINUTE_MS) : undefined;
+    this.#store.waveDelivered(seq, index, delivery, at, nextDueAt);
     delete seq.inFlight;
-    seq.nextWave++;
+    seq.nextWave = index + 1;
     seq.attempts = 0;
+    if (nextDueAt) seq.dueAt = nextDueAt;
   }
 
   /** Reports the water going off once the last cycle's run time has elapsed (not persisted: a restart skips it). */
@@ -419,6 +427,7 @@ export class Sequencer {
       cycles: seq.waves.length,
       deliveredMinutes: round1(seq.waves.reduce((sum, w) => sum + minutesOf(w), 0)),
     });
+    this.#store.sequenceCompleted(seq, this.#deps.now());
     this.#remove(seq);
   }
 
@@ -439,6 +448,7 @@ export class Sequencer {
       `Abandoned watering sequence ${seq.id} on device ${seq.deviceId} after ${seq.nextWave}/${seq.waves.length} cycle(s) ` +
         `(${round1(delivered)} of ${round1(planned)} min): ${reason}`,
     );
+    this.#store.sequenceAbandoned(seq, this.#deps.now(), reason);
     this.#remove(seq);
   }
 
@@ -454,10 +464,30 @@ export class Sequencer {
     return seq.waves.length > 1 ? `cycle ${seq.nextWave + 1}/${seq.waves.length}` : 'the run';
   }
 
-  async #save(): Promise<void> {
-    await this.#deps.save();
-  }
 }
+
+/** Why each zone is in the sequence, from the command's zones and the decisions that led to it. */
+const zonesOf = (command: DeviceCommand, decisions: readonly ZoneDecision[]): SequenceZone[] =>
+  command.zones.flatMap((z): SequenceZone[] => {
+    const minutes = round1(command.waves.flat().reduce((sum, r) => (r.station === z.station ? sum + r.runTime : sum), 0));
+    if (minutes <= 0) return [];
+    const d = decisions.find((x) => x.zone.key === z.key);
+    const at = d?.reading?.at;
+    return [
+      {
+        zoneKey: z.key,
+        zoneName: z.name,
+        thresholdPct: z.thresholdPct,
+        targetPct: z.targetPct,
+        requestedMinutes: minutes,
+        ...(d?.reading && Number.isFinite(d.reading.moisturePct) ? { moisturePct: d.reading.moisturePct } : {}),
+        ...(at && Number.isFinite(at.getTime()) ? { readingAt: at } : {}),
+        ...(d?.allowanceMinutes !== undefined ? { allowanceMinutes: d.allowanceMinutes } : {}),
+        ...(d?.budget ? { budget: d.budget } : {}),
+        detail: d?.detail ?? 'no decision recorded',
+      },
+    ];
+  });
 
 const summary = (wave: readonly StationRun[]): string => wave.map((r) => `station ${r.station} for ${r.runTime} min`).join(', ');
 

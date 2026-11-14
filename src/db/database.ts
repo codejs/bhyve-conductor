@@ -1,11 +1,26 @@
+import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { drizzle, type NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { migrate } from 'drizzle-orm/node-sqlite/migrator';
+import { log } from '../log.ts';
 import { relations } from './relations.ts';
+import { dropRepeatables, ensureRepeatables, REPEATABLE_OBJECTS, type RepeatableObject } from './repeatable.ts';
 
 /**
- * Opens the conductor's SQLite database and brings its schema up to date.
+ * Opens the conductor's SQLite database and brings its schema up to date, keeping the data:
+ *
+ *  1. A file that already holds data is copied to `<file>.before-<first pending migration>` before any
+ *     migration runs (VACUUM INTO: a consistent snapshot even while other connections read).
+ *  2. The app-owned views and triggers are dropped, so drizzle-kit's table rebuilds can't trip over them.
+ *  3. Pending migrations run in one transaction with foreign keys off. SQLite prescribes this for schema
+ *     changes: with them on, the DROP TABLE of a rebuild deletes the rows first and ON DELETE CASCADE empties
+ *     the child tables. drizzle-kit's own `PRAGMA foreign_keys=OFF` line does nothing inside the migrator's
+ *     transaction, so it is set out here.
+ *  4. `PRAGMA foreign_key_check` must come back clean, and the views and triggers are re-created.
+ *
+ * A failed migration rolls back completely, and the service refuses to start.
  *
  * Uses Node's built-in node:sqlite (no native module to build on a Raspberry Pi). It is synchronous, which
  * suits the tiny write volume and keeps audit events in order.
@@ -17,13 +32,21 @@ export const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../drizzle', import.m
 /** 'BHyC', stored in the file header so a conductor database can be told apart from any other SQLite file. */
 export const APPLICATION_ID = 0x42487943;
 
+const MIGRATIONS_TABLE = '__drizzle_migrations';
+
 export type ConductorDb = NodeSQLiteDatabase<typeof relations> & { $client: DatabaseSync };
 
 export interface OpenDatabaseOptions {
   /** Default: MIGRATIONS_FOLDER. */
   migrationsFolder?: string;
-  /** How long to wait for another connection's write lock (e.g. `npm run audit` reading). Default 5 s. */
+  /** How long to wait for another connection's write lock. Default 5 s. */
   busyTimeoutMs?: number;
+  /** Only read (e.g. `npm run audit` next to the running service): no migrations, no writes. The file must exist. */
+  readOnly?: boolean;
+  /** Copy the file before upgrading it (default true; file databases that already hold data only). */
+  backup?: boolean;
+  /** The views and triggers to maintain (default: all of them). For tests. */
+  repeatables?: readonly RepeatableObject[];
 }
 
 const pragma = (client: DatabaseSync, name: string): unknown => {
@@ -31,23 +54,70 @@ const pragma = (client: DatabaseSync, name: string): unknown => {
   return row ? Object.values(row)[0] : undefined;
 };
 
+/** Names of the migrations already applied to this database. */
+export const appliedMigrations = (client: DatabaseSync): string[] => {
+  const table = client.prepare(`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?`).get(MIGRATIONS_TABLE);
+  if (!table) return [];
+  return (client.prepare(`SELECT name FROM ${MIGRATIONS_TABLE} ORDER BY id`).all() as { name: string | null }[])
+    .map((r) => r.name)
+    .filter((n): n is string => n !== null);
+};
+
+/** Migrations in `folder` not yet applied, in the order the migrator runs them (same rule as drizzle's). */
+export const pendingMigrations = (client: DatabaseSync, folder: string = MIGRATIONS_FOLDER): string[] => {
+  const applied = new Set(appliedMigrations(client));
+  return readMigrationFiles({ migrationsFolder: folder })
+    .map((m) => m.name)
+    .filter((name): name is string => typeof name === 'string' && !applied.has(name));
+};
+
+const checkOwner = (client: DatabaseSync, path: string, readOnly: boolean): void => {
+  const appId = pragma(client, 'application_id');
+  if (appId === APPLICATION_ID) return;
+  const tables = client
+    .prepare(`SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'`)
+    .get() as { n: number };
+  // A file with tables but without our id was not created here: don't add tables to someone else's database.
+  if (appId !== 0 || tables.n > 0 || readOnly) {
+    throw new Error(`${path} is not a bhyve-conductor database (application_id ${String(appId)}, ${tables.n} table(s))`);
+  }
+  client.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
+};
+
+const isFile = (path: string): boolean => path !== '' && path !== ':memory:' && !path.startsWith('file:');
+
+/** Copies the file before an upgrade; returns where the copy is. */
+const backupBeforeUpgrade = (client: DatabaseSync, path: string, firstPending: string): string => {
+  const target = `${path}.before-${firstPending}`;
+  // A previous attempt at the same upgrade failed: keep the copy from before the first attempt.
+  if (existsSync(target)) {
+    log.warn(`Database backup ${target} already exists (an earlier upgrade attempt); keeping it`);
+    return target;
+  }
+  client.prepare('VACUUM INTO ?').run(target);
+  log.info(`Backed up ${path} to ${target} before upgrading its schema`);
+  return target;
+};
+
 /**
- * Opens (creating if needed) the database at `path` (':memory:' for tests and simulations) and applies any
- * pending migrations in one transaction. Throws if the file belongs to something else.
+ * Opens (creating if needed) the database at `path` (':memory:' for tests and simulations) and brings its
+ * schema up to date. Throws if the file belongs to something else or an upgrade fails.
  */
 export const openDatabase = (path: string, options: OpenDatabaseOptions = {}): ConductorDb => {
-  const client = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: options.busyTimeoutMs ?? 5_000 });
+  const readOnly = options.readOnly ?? false;
+  if (readOnly && isFile(path) && !existsSync(path)) {
+    throw new Error(`${path} does not exist yet: it is created when the conductor starts (or with npm run db:migrate)`);
+  }
+  const client = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: options.busyTimeoutMs ?? 5_000, readOnly });
   try {
-    const appId = pragma(client, 'application_id');
-    if (appId !== APPLICATION_ID) {
-      const tables = client
-        .prepare(`SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'`)
-        .get() as { n: number };
-      // A file with tables but without our id was not created here: don't add tables to someone else's database.
-      if (appId !== 0 || tables.n > 0) {
-        throw new Error(`${path} is not a bhyve-conductor database (application_id ${String(appId)}, ${tables.n} table(s))`);
-      }
-      client.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
+    checkOwner(client, path, readOnly);
+    const folder = options.migrationsFolder ?? MIGRATIONS_FOLDER;
+    const db = drizzle({ client, relations });
+
+    if (readOnly) {
+      const pending = pendingMigrations(client, folder);
+      if (pending.length > 0) log.warn(`${path} is not up to date (${pending.length} migration(s) pending); start the conductor or run npm run db:migrate`);
+      return db;
     }
 
     // Readers (`npm run audit`) never block the service. Persistent, and can't be changed inside a transaction.
@@ -56,20 +126,42 @@ export const openDatabase = (path: string, options: OpenDatabaseOptions = {}): C
     // default NORMAL, a power cut can drop the last commits in WAL mode. Per connection.
     client.exec('PRAGMA synchronous = FULL');
 
-    // Migrations run with foreign keys off, as SQLite prescribes for schema changes. drizzle-kit changes a
-    // table by rebuilding it (copy, DROP TABLE, rename). With foreign keys on, that DROP deletes the rows first,
-    // and ON DELETE CASCADE then empties the child tables: rebuilding watering_sequence would wipe every wave.
-    // The `PRAGMA foreign_keys=OFF` that drizzle-kit writes into such a migration does nothing, because the
-    // migrator runs inside a transaction. This pragma has to be set out here.
-    client.exec('PRAGMA foreign_keys = OFF');
-    const db = drizzle({ client, relations });
-    migrate(db, { migrationsFolder: options.migrationsFolder ?? MIGRATIONS_FOLDER });
-    const broken = client.prepare('PRAGMA foreign_key_check').all() as { table: string; parent: string }[];
-    if (broken.length > 0) {
-      const where = [...new Set(broken.map((v) => `${v.table} → ${v.parent}`))].join(', ');
-      throw new Error(`${path}: ${broken.length} row(s) reference missing rows (${where}); a migration went wrong, restore a backup`);
+    const repeatables = options.repeatables ?? REPEATABLE_OBJECTS;
+    const pending = pendingMigrations(client, folder);
+    if (pending.length > 0) {
+      let backup: string | undefined;
+      if (appliedMigrations(client).length > 0 && isFile(path) && options.backup !== false) {
+        backup = backupBeforeUpgrade(client, path, pending[0] ?? 'upgrade');
+      }
+      dropRepeatables(client, repeatables);
+      client.exec('PRAGMA foreign_keys = OFF');
+      try {
+        migrate(db, { migrationsFolder: folder });
+      } catch (err) {
+        // Rolled back: put the views and triggers back for the schema that is still there.
+        client.exec('PRAGMA foreign_keys = ON');
+        try {
+          ensureRepeatables(client, repeatables);
+        } catch (restoreErr) {
+          log.error('Could not restore views and triggers after the failed upgrade', restoreErr);
+        }
+        // drizzle's error names the failed statement; SQLite's reason is its cause.
+        const reason = err instanceof Error && err.cause instanceof Error ? err.cause.message : err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `${path}: upgrading the database failed, nothing was changed (${reason}). Pending: ${pending.join(', ')}.` +
+            (backup ? ` A copy from before the upgrade is at ${backup}.` : ''),
+          { cause: err },
+        );
+      }
+      const broken = client.prepare('PRAGMA foreign_key_check').all() as { table: string; parent: string }[];
+      if (broken.length > 0) {
+        const where = [...new Set(broken.map((v) => `${v.table} → ${v.parent}`))].join(', ');
+        throw new Error(`${path}: ${broken.length} row(s) reference missing rows (${where}); a migration went wrong, restore a backup`);
+      }
+      log.info(`Database ${path}: applied ${pending.length} migration(s): ${pending.join(', ')}`);
     }
     client.exec('PRAGMA foreign_keys = ON');
+    ensureRepeatables(client, repeatables);
     return db;
   } catch (err) {
     client.close();

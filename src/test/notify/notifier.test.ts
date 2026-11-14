@@ -167,6 +167,7 @@ describe('Notifier', () => {
       ['service.unclean_shutdown', { lastEvent: 'wave.sent', lastEventAt: START.toISOString() }, 'critical', '💥 <b>Lawn conductor restarted after a crash or power loss</b>\nLast activity: wave.sent at Jul 1, 07:00. Unfinished watering is resumed if still due.'],
       ['poll.failed', { error: 'poll did not finish within 10 min (something is hanging); moving on' }, 'critical', '⏳ <b>Monitoring got stuck</b> and was restarted: poll did not finish within 10 min (something is hanging); moving on'],
       ['state.save_failed', { error: 'ENOSPC' }, 'critical', '💾 <b>Can’t save state</b>: ENOSPC\nCooldowns and pending cycles won’t survive a restart.'],
+      ['state.save_restored', { failures: 3, outageMinutes: 40 }, 'info', '💾 Saving state works again after 40 min (3 failed saves)'],
     ] as const)('%s → %s', (type, data, severity, text) => {
       const t = setup();
       t.record(type, data);

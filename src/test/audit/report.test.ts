@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AuditEvent } from '../../audit/audit.ts';
-import { describe as describeEvent, filterEvents, formatEvent, formatSummary, parseSince, summarize } from '../../audit/report.ts';
+import { describe as describeEvent, filterEvents, formatEvent, formatSummary, parseSince, shortId, summarize } from '../../audit/report.ts';
 
 const NOW = new Date('2026-07-01T12:00:00Z');
 const ev = (ts: string, type: AuditEvent['type'], data: Record<string, unknown> = {}): AuditEvent => ({ ts, type, ...data });
@@ -80,6 +80,16 @@ describe('filterEvents', () => {
     expect(filterEvents(INCIDENT, { sequence: 's1' })).toHaveLength(8);
   });
 
+  it('finds a sequence by the beginning of its id, as messages show it', () => {
+    const id = '3f9a1c2e-7b4d-4e21-9c0a-5d6e7f801234';
+    const events = [ev(NOW.toISOString(), 'wave.sent', { sequence: id }), ev(NOW.toISOString(), 'wave.sent', { sequence: '3f9a0000-0000-4000-8000-000000000000' })];
+
+    expect(filterEvents(events, { sequence: '3f9a1c2e' })).toEqual([events[0]]);
+    expect(filterEvents(events, { sequence: id })).toEqual([events[0]]);
+    expect(filterEvents(events, { sequence: '3f9a' })).toHaveLength(2);
+    expect(filterEvents([ev(NOW.toISOString(), 'service.started')], { sequence: '3f9a' })).toEqual([]);
+  });
+
   it('finds a zone by key, station or zone list', () => {
     expect(types(filterEvents(INCIDENT, { zone: 'dev1:1' }))).toContain('sequence.started');
     expect(filterEvents(INCIDENT, { zone: 'dev1:1' }).filter((e) => e.type === 'wave.sent')).toHaveLength(2);
@@ -112,6 +122,31 @@ describe('describe / formatEvent', () => {
     const resumed = ev('2026-07-01T11:50:00.000Z', 'sequence.resumed', { sequence: 'x', device: 'dev1', nextCycle: 3, of: 3, dueAt: '2026-07-01T11:56:00.000Z' });
 
     expect(describeEvent(resumed, 'America/Chicago')).toBe('watering resumed after restart dev1 [seq x] at cycle 3/3 (due 2026-07-01 06:56:00)');
+  });
+
+  it('shows the first 8 characters of a sequence id', () => {
+    const id = '3f9a1c2e-7b4d-4e21-9c0a-5d6e7f801234';
+
+    expect(shortId(id)).toBe('3f9a1c2e');
+    expect(describeEvent(ev(NOW.toISOString(), 'sequence.completed', { sequence: id, device: 'dev1', cycles: 1, deliveredMinutes: 5 }))).toBe(
+      'watering completed dev1 [seq 3f9a1c2e]: 5 min in 1 cycle(s)',
+    );
+    const summary = formatSummary(summarize([ev(NOW.toISOString(), 'sequence.started', { sequence: id, device: 'dev1', plannedMinutes: 5 })]), 'UTC');
+    expect(summary).toContain('  3f9a1c2e  dev1 ');
+    expect(summary).not.toContain(id);
+  });
+
+  it('describes storage events', () => {
+    expect(describeEvent(ev(NOW.toISOString(), 'state.save_failed', { step: 'waveSending', error: 'database or disk is full' }))).toBe(
+      'could not save state (waveSending): database or disk is full',
+    );
+    expect(describeEvent(ev(NOW.toISOString(), 'state.save_restored', { failures: 3, outageMinutes: 40, lastError: 'database or disk is full' }))).toBe(
+      'saving state works again after 40 min (3 failed saves; last error: database or disk is full)',
+    );
+    expect(describeEvent(ev(NOW.toISOString(), 'storage.imported', { runs: 2, sequences: 1, alerts: 1, auditEvents: 300 }))).toBe(
+      "imported the previous version's files: 2 runs, 1 pending sequences, 1 alerts, 300 audit events",
+    );
+    expect(formatEvent(ev(NOW.toISOString(), 'state.save_restored', { failures: 1, outageMinutes: 1 }), 'UTC')).toMatch(/ ! state\.save_restored/);
   });
 
   it('falls back to the raw fields for unknown event types', () => {

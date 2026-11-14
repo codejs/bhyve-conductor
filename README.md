@@ -19,9 +19,9 @@ is; the conductor only adds water on top when the sensors say the schedule isn't
 - **Stays on the safe side.** Stale or offline sensors never trigger watering. Cooldowns and daily
   caps stop it from overwatering, even across restarts. It respects rain delays and controllers that
   are switched off.
-- **Tells you what happened.** Every watering and connection event goes to an audit trail you can
-  review with `npm run audit`. Alerts (low batteries, critically dry or wet soil, controller offline)
-  can be sent to Telegram.
+- **Tells you what happened.** Every watering (what was planned, why, and what was delivered) and every
+  connection event is kept in a local SQLite database you can review with `npm run audit`. Alerts (low
+  batteries, critically dry or wet soil, controller offline) can be sent to Telegram.
 
 ## Who it's for
 
@@ -77,9 +77,8 @@ Fill in `.env`:
 | `TUYA_MOISTURE_CODE` | no | Data point holding moisture % (default `humidity`) |
 | `LOCATION` | no | Enables forecast-based watering: `lat,lon`, a US ZIP, `City, ST` or a place name |
 | `CONDUCTOR_CONFIG` | no | Zone config file (default `conductor.json`) |
-| `CONDUCTOR_STATE` | no | Watering history file (default `.conductor-state.json`) |
-| `CONDUCTOR_AUDIT` | no | Audit trail file (default `.conductor-audit.jsonl`) |
-| `CONDUCTOR_DB` | no | SQLite database (default `.conductor.db`); the upcoming replacement for the two files above, see [docs/sqlite-storage.md](docs/sqlite-storage.md) |
+| `CONDUCTOR_DB` | no | SQLite database with the watering history and schedule, pending cycles, alerts and the audit trail (default `.conductor.db`); see [docs/sqlite-storage.md](docs/sqlite-storage.md) |
+| `CONDUCTOR_STATE`, `CONDUCTOR_AUDIT` | no | Files of versions before the database (defaults `.conductor-state.json`, `.conductor-audit.jsonl`); imported once on the first start, then renamed to `*.imported` |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | Telegram alerts; see [docs/notifications.md](docs/notifications.md) |
 | `LOG_LEVEL` | no | `debug`, `info` (default), `warn` or `error` |
 
@@ -149,7 +148,7 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 | `npm run weather:forecast` | Show the forecast and upcoming B-hyve runs the water budget uses |
 | `npm run audit` | Review the audit trail (`audit:summary`, `audit:recovery`; filters such as `-- --since 7d` or `-- --zone <deviceId>:2` are listed at the top of `src/scripts/audit.ts`) |
 | `npm run notify:test` | Send a test Telegram message |
-| `npm run db:migrate` | Create or upgrade the SQLite database (`CONDUCTOR_DB`, or `-- --file <path>`) |
+| `npm run db:migrate` | Create or upgrade the SQLite database (`CONDUCTOR_DB`, or `-- --file <path>`); the service does this itself at startup |
 | `npm run db:generate` / `npm run db:check` | Write a migration to `drizzle/` after changing `src/db/schema.ts` / check the migrations folder |
 | `npm run simulate -- --list` | List simulated scenarios (outages, storms, dead batteries, ...); `-- --all` runs them |
 | `npm test` / `npm run test:watch` / `npm run test:coverage` | Run the tests |
@@ -169,7 +168,7 @@ Next items, roughly four days of work each, in priority order:
 - [ ] **Watering amounts that match the hardware:** daily cap in inches, skip Smart Watering programs in the expected water, whole-minute runs, no runs just before a scheduled program.
 - [ ] **Sensor calibration and trust:** per-sensor calibration with a `sensors:calibrate` helper; flag sensors that disagree with their zone or jump without rain or watering.
 - [ ] **Shadow mode:** dry runs that keep history, persisted dry-spell tracking, and a daily report of what the conductor would have added.
-- [ ] **Unattended deployment:** Dockerfile and systemd unit, a `doctor` config check, audit and state file rotation, a health endpoint and a heartbeat alert.
+- [ ] **Unattended deployment:** Dockerfile and systemd unit, a `doctor` config check, audit-trail retention in the database, a health endpoint and a heartbeat alert.
 - [ ] **Water-use reporting:** per-zone daily and weekly totals (minutes, inches, gallons, moisture), an `npm run report` command and a weekly Telegram digest.
 
 ## License

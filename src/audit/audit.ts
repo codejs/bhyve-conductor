@@ -1,9 +1,10 @@
-import { appendFile, open, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { log } from '../log.ts';
 
 /**
- * Append-only audit trail (JSON Lines): one event per line, never rewritten, so it can be reviewed
- * after an incident with `npm run audit`. Everything that affects watering or connectivity goes here.
+ * Audit trail: everything that affects watering or connectivity, never rewritten, so it can be reviewed
+ * after an incident with `npm run audit`. The service stores it in SQLite (db/audit-log.ts); the JSON Lines
+ * format here is for simulations, exports and the trail of older versions.
  */
 
 export type AuditType =
@@ -37,7 +38,11 @@ export type AuditType =
   | 'wave.retry_scheduled'
   /** Found in flight after a restart: we can't know if it ran, so it's counted as delivered. */
   | 'wave.assumed_delivered'
+  /** Saving state (the database) started failing / works again. Transitions only. */
   | 'state.save_failed'
+  | 'state.save_restored'
+  /** The JSON state file and JSONL audit trail of an older version were imported into the database. */
+  | 'storage.imported'
   /** All cycles were sent and the last one's run time has elapsed: the water is off. */
   | 'sequence.finished'
   | 'battery.low'
@@ -68,30 +73,6 @@ export interface AuditSink {
   record(type: AuditType, data?: Record<string, unknown>): void;
 }
 
-/** Appends to a JSONL file. Writes are queued so events keep their order; failures are logged, never thrown. */
-export class FileAuditLog implements AuditSink {
-  readonly #path: string;
-  readonly #now: () => Date;
-  #queue: Promise<void> = Promise.resolve();
-
-  constructor(path: string, now: () => Date = () => new Date()) {
-    this.#path = path;
-    this.#now = now;
-  }
-
-  record(type: AuditType, data: Record<string, unknown> = {}): void {
-    const line = `${JSON.stringify({ ts: this.#now().toISOString(), type, ...data }, errorReplacer)}\n`;
-    this.#queue = this.#queue
-      .then(() => appendFile(this.#path, line, 'utf8'))
-      .catch((err: unknown) => log.error(`Could not write audit event ${type} to ${this.#path}`, err));
-  }
-
-  /** Resolves once everything recorded so far is on disk. */
-  flush(): Promise<void> {
-    return this.#queue;
-  }
-}
-
 /** Keeps events in memory (tests, or when no audit file is wanted). */
 export class MemoryAuditLog implements AuditSink {
   readonly events: AuditEvent[] = [];
@@ -113,6 +94,10 @@ export class MemoryAuditLog implements AuditSink {
 /** Errors don't serialize with JSON.stringify; keep their message. */
 const errorReplacer = (_key: string, value: unknown): unknown =>
   value instanceof Error ? value.message : value instanceof Date ? value.toISOString() : value;
+
+/** An event's data as it will read back: JSON only (Errors become their message, Dates ISO strings). */
+export const toJsonData = (data: Record<string, unknown>): Record<string, unknown> =>
+  JSON.parse(JSON.stringify(data, errorReplacer)) as Record<string, unknown>;
 
 /** Sends every event to several sinks (e.g. the audit file and the notifier). One failing doesn't affect the others. */
 export const teeAudit = (...sinks: AuditSink[]): AuditSink => ({
@@ -156,24 +141,4 @@ export const parseAudit = (text: string): { events: AuditEvent[]; skipped: numbe
     }
   }
   return { events, skipped };
-};
-
-/** The last complete event in the file, reading only its tail (the file grows forever). */
-export const lastAuditEvent = async (path: string, tailBytes = 64 * 1024): Promise<AuditEvent | undefined> => {
-  let handle;
-  try {
-    handle = await open(path, 'r');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw err;
-  }
-  try {
-    const { size } = await handle.stat();
-    const length = Math.min(size, tailBytes);
-    const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, size - length);
-    return parseAudit(buf.toString('utf8')).events.at(-1);
-  } finally {
-    await handle.close();
-  }
 };

@@ -1,15 +1,20 @@
-import { MemoryAuditLog, teeAudit, type AuditEvent } from '../audit/audit.ts';
+import { teeAudit, type AuditEvent, type AuditSink } from '../audit/audit.ts';
 import { VirtualClock } from '../clock.ts';
 import { parseConductorConfig, type ConductorConfig } from '../conductor/config.ts';
 import { WateringHistory } from '../conductor/history.ts';
 import { Monitor } from '../conductor/monitor.ts';
-import type { ConductorState } from '../conductor/state.ts';
+import { queryAuditEvents } from '../db/audit-log.ts';
+import { openDatabase, type ConductorDb } from '../db/database.ts';
+import { sequenceResult, zoneWatering, type SequenceResultRow } from '../db/schema.ts';
+import { beginSession, type Session } from '../db/session.ts';
 import { Notifier, type Notification } from '../notify/notifier.ts';
 import { SimWorld, type WorldOptions } from './world.ts';
 
 /**
- * Runs the real conductor (Monitor, Sequencer, alerts, Notifier) against a SimWorld in virtual time,
- * so hours of garden life, outages and crashes play out in milliseconds and leave a real audit trail.
+ * Runs the real conductor (Monitor, Sequencer, alerts, Notifier, and its SQLite storage) against a SimWorld
+ * in virtual time, so hours of garden life, outages and crashes play out in milliseconds and leave a real
+ * audit trail. The database is in memory and outlives crashes like a file would: a restart carries on from
+ * whatever the crashed run had committed.
  */
 
 export interface SimContext {
@@ -17,7 +22,7 @@ export interface SimContext {
   clock: VirtualClock;
   /** Marks something in the audit trail ("▶ B-hyve goes down"). */
   note(text: string): void;
-  /** Kills the conductor without a clean shutdown (state on "disk" is whatever was last saved). */
+  /** Kills the conductor without a clean shutdown (the database keeps whatever was committed). */
   crash(): Promise<void>;
   /** Starts the conductor again from the saved state. */
   restart(): Promise<void>;
@@ -48,6 +53,8 @@ export interface SimResult {
   events: AuditEvent[];
   notifications: Notification[];
   timeZone: string;
+  /** What the database holds at the end: each watering sequence's outcome and the watering ledger. */
+  stored: { sequences: SequenceResultRow[]; ledger: { zoneKey: string; startedAt: Date; minutes: number; sequenceId: string | null }[] };
 }
 
 export const SIM_TIME_ZONE = 'America/Chicago';
@@ -92,12 +99,6 @@ export const baseWorld = (world: SimWorld): void => {
   world.addSensor({ id: 'back-a', name: 'Back sensor', zone: 'timer-1:2', moisture: 37 });
 };
 
-const cloneState = (s: ConductorState): ConductorState => ({
-  history: new WateringHistory(s.history.runs.map((r) => ({ ...r, at: new Date(r.at) }))),
-  sequences: structuredClone(s.sequences),
-  alerts: structuredClone(s.alerts),
-});
-
 export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
   const start = new Date(scenario.start ?? DEFAULT_START);
   const clock = new VirtualClock(start);
@@ -106,36 +107,32 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
   scenario.setup(world);
   const config: ConductorConfig = parseConductorConfig((scenario.config ?? ((c) => c))(baseConfig()));
 
-  const memory = new MemoryAuditLog(() => clock.now());
+  const db: ConductorDb = openDatabase(':memory:');
   const notifications: Notification[] = [];
-  /** What's "on disk": the state as last saved. */
-  let saved: ConductorState = { history: new WateringHistory(), sequences: [], alerts: {} };
-  const store = {
-    save: async (state: ConductorState) => {
-      saved = cloneState(state);
-    },
-  };
-
   let monitor: Monitor | undefined;
   let notifier: Notifier | undefined;
+  let session: Session | undefined;
+  /** Where simulation notes go: the current (or last) run's audit trail. */
+  let trail: AuditSink | undefined;
 
   const boot = () => {
+    session = beginSession(db, { config, mode: 'continuous', now: () => clock.now() });
     notifier = new Notifier({ options: config.notifications, deliver: (n) => notifications.push(n), clock });
-    const audit = teeAudit(memory, notifier);
-    const last = memory.events.filter((e) => e.type !== 'simulation.note').at(-1);
-    if (last && last.type !== 'service.stopped') {
-      audit.record('service.unclean_shutdown', { lastEvent: last.type, lastEventAt: last.ts });
-    }
+    trail = session.audit;
+    const audit = teeAudit(session.audit, notifier);
+    if (session.unclean) audit.record('service.unclean_shutdown', { ...session.unclean });
     audit.record('service.started', { mode: 'continuous', dryRun: false, zones: config.zones.length });
-    const state = cloneState(saved);
+    const { state } = session;
     monitor = new Monitor({
       config,
       source: world.source,
       bhyve: world.bhyve,
-      history: state.history,
+      history: new WateringHistory(state.history),
       pendingSequences: state.sequences,
       alertState: state.alerts,
-      store,
+      zoneSpells: state.zoneSpells,
+      store: session.store,
+      heartbeat: session.heartbeat,
       audit,
       clock,
       ...(scenario.weather ? { weather: world.weather } : {}),
@@ -154,7 +151,7 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
   const ctx: SimContext = {
     world,
     clock,
-    note: (text) => memory.record('simulation.note', { note: text }),
+    note: (text) => trail?.record('simulation.note', { note: text }),
     crash: halt,
     restart: async () => boot(),
   };
@@ -170,7 +167,17 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
 
   if (monitor) {
     await halt();
-    memory.record('service.stopped', { reason: 'end of simulation' });
+    trail?.record('service.stopped', { reason: 'end of simulation' });
+    session?.end('end of simulation');
   }
-  return { scenario, events: memory.events, notifications, timeZone: SIM_TIME_ZONE };
+  const stored = {
+    sequences: db.select().from(sequenceResult).all(),
+    ledger: db
+      .select({ zoneKey: zoneWatering.zoneKey, startedAt: zoneWatering.startedAt, minutes: zoneWatering.minutes, sequenceId: zoneWatering.sequenceId })
+      .from(zoneWatering)
+      .all(),
+  };
+  const events = queryAuditEvents(db);
+  db.$client.close();
+  return { scenario, events, notifications, timeZone: SIM_TIME_ZONE, stored };
 };
