@@ -42,6 +42,8 @@ const EnvSchema = z.object({
   CONDUCTOR_STATE: z.string().min(1).default('.conductor-state.json'),
   /** Append-only audit trail of watering and connectivity events (review with `npm run audit`). */
   CONDUCTOR_AUDIT: z.string().min(1).default('.conductor-audit.jsonl'),
+  /** SQLite database (see docs/sqlite-storage.md); `npm run db:migrate` creates or upgrades it. */
+  CONDUCTOR_DB: z.string().min(1).default('.conductor.db'),
 
   /** Telegram notifications (optional): the bot token from @BotFather and the chat to post to. */
   TELEGRAM_BOT_TOKEN: blankAsUnset(z.string().regex(/^\d+:[\w-]{20,}$/, 'expected a bot token like 123456789:AA...').optional()),
