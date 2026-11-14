@@ -1,0 +1,48 @@
+// Writes a database with the drizzle-based version's own code (this checkout is that version).
+import { rmSync } from 'node:fs';
+import { openDatabase } from './src/db/database.ts';
+import { beginSession } from './src/db/session.ts';
+import { SqliteAuditLog } from './src/db/audit-log.ts';
+import { zone } from './src/test/utils/conductor.ts';
+const out = process.argv[2]!;
+for (const f of [out, `${out}-wal`, `${out}-shm`]) rmSync(f, { force: true });
+const T = (m: number) => new Date(Date.parse('2026-07-01T11:00:00.000Z') + m * 60_000);
+const config = { pollIntervalMinutes: 15, dryRun: false, forecastHours: 72, recovery: { confirmTimeoutSeconds: 20, retryWindowMinutes: 30, resumeWindowMinutes: 60 }, alerts: { lowBatteryPct: 20, deviceCheckMinutes: 60 }, notifications: { minSeverity: 'info' as const, cycles: false, connectionGraceMinutes: 5 }, zones: [zone({ name: 'Front lawn', deviceId: 'timer-1' }), zone({ name: 'Back lawn', deviceId: 'timer-1', station: 2 })] };
+const db = openDatabase(out);
+let now = T(0);
+// run 1: stopped cleanly
+const s1 = beginSession(db, { config, mode: 'continuous', now: () => now, pid: 101 });
+s1.audit.record('service.started', { mode: 'continuous', dryRun: false, zones: 2 });
+const seq = (id: string, device: string, at: Date) => ({ id, deviceId: device, waves: [[{ station: 1, runTime: 8 }, { station: 2, runTime: 4.5 }], [{ station: 1, runTime: 8 }]], soakMinutes: 20, createdAt: at, nextWave: 0, dueAt: at, attempts: 0 });
+const why = [{ zoneKey: 'timer-1:1', zoneName: 'Front lawn', thresholdPct: 30, targetPct: 40, requestedMinutes: 16, moisturePct: 24.5, readingAt: T(-3), allowanceMinutes: 30, budget: { inches: 0.4, minutes: 16, startIn: 1.47, thresholdIn: 1.8, targetIn: 2.4, cropUseIn: 0.2, rainIn: 0, scheduledIn: 0, windowHours: 72, waitHours: 6, limitedByCapacity: false, summary: 'apply 0.4in (16 min)' }, detail: 'average of 2 sensors at 24.5% is below 30%' }, { zoneKey: 'timer-1:2', zoneName: 'Back lawn', thresholdPct: 30, targetPct: 40, requestedMinutes: 4.5, detail: 'dry' }];
+const done = seq('3d7cc742-aaaa-4bbb-8ccc-000000000001', 'timer-1', T(0));
+s1.store.sequenceStarted(done, why);
+s1.store.waveSending(done, 0, T(0)); s1.store.waveDelivered(done, 0, 'event', T(0), T(32.5));
+s1.audit.record('wave.confirmed', { sequence: done.id, device: 'timer-1', cycle: 1, of: 2, via: 'event' });
+now = T(32.5); s1.store.waveSending(done, 1, T(32.5)); s1.store.waveDelivered(done, 1, 'unconfirmed', T(32.5), undefined); s1.store.sequenceCompleted(done, T(32.5));
+s1.audit.record('sequence.completed', { sequence: done.id, device: 'timer-1', zoneNames: ['Front lawn', 'Back lawn'], cycles: 2 });
+const gone = seq('77aa0000-bbbb-4ccc-8ddd-000000000002', 'timer-2', T(60));
+s1.store.sequenceStarted(gone, []); s1.store.waveFailed(gone, 0); s1.store.waveFailed(gone, 0); s1.store.sequenceAbandoned(gone, T(90), 'gave up on cycle 1/2 after 2 attempt(s)');
+s1.store.saveAlerts({ 'battery:sensor:front-a': { state: 'low', since: T(5).toISOString() }, 'moisture:timer-1:1:front-a': { state: 'high', since: T(40).toISOString() }, 'device:timer-2': { state: 'offline', since: T(61).toISOString() } });
+s1.store.recordReadings([{ sensorId: 'front-a', sensorName: 'A', moisturePct: 24, temperatureC: 21.5, batteryPct: 15, online: true, at: T(-3) }, { sensorId: 'back-a', sensorName: 'B', moisturePct: Number.NaN, online: false, at: T(-2) }], T(0));
+for (let i = 0; i < 30; i++) s1.audit.record('zone.decision', { zone: 'timer-1:1', name: 'Front lawn', reason: i % 2 ? 'moist' : 'dry', detail: `poll ${i}`, device: i === 7 ? 12345 : undefined });
+now = T(120); s1.end('SIGTERM');
+// run 2: crashed mid-send
+now = T(300);
+const s2 = beginSession(db, { config, mode: 'continuous', now: () => now, pid: 202 });
+s2.audit.record('service.started', { mode: 'continuous', dryRun: false, zones: 2 });
+const crashed = seq('mid-send-0000-4000-8000-000000000003', 'timer-1', T(300));
+s2.store.sequenceStarted(crashed, why);
+s2.store.waveSending(crashed, 0, T(300)); s2.store.waveDelivered(crashed, 0, 'status', T(300), T(332.5));
+now = T(332.5); s2.store.waveFailed(crashed, 1); s2.store.waveSending(crashed, 1, T(333));
+s2.audit.record('wave.sent', { sequence: crashed.id, device: 'timer-1', cycle: 2, of: 2, stations: [{ station: 1, runTime: 8 }], attempt: 2 });
+s2.store.saveZoneSpells([{ zoneKey: 'timer-1:1', drySince: T(290) }, { zoneKey: 'timer-1:2', noDataSince: T(200) }], T(333));
+for (let i = 0; i < 3; i++) s2.audit.record('zone.decision', { zone: 'timer-1:2', reason: 'test', detail: 'removed below' });
+s2.heartbeat();
+// those three were deleted (retention): the id counter is now above the highest id left
+db.$client.exec(`DELETE FROM audit_event WHERE id > (SELECT max(id) - 3 FROM audit_event)`);
+// an imported run without provenance (from the JSON files of an even older version)
+db.$client.prepare(`INSERT INTO zone_watering (zone_key, started_at, minutes) VALUES ('timer-1:2', ?, 12)`).run(T(-600).toISOString());
+db.$client.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+db.$client.close(); // no end(): a crash
+console.log('written', out);

@@ -1,11 +1,11 @@
-import { teeAudit, type AuditEvent, type AuditSink } from '../audit/audit.ts';
+import { teeAudit, type AuditEvent } from '../audit/audit.ts';
 import { VirtualClock } from '../clock.ts';
 import { parseConductorConfig, type ConductorConfig } from '../conductor/config.ts';
 import { WateringHistory } from '../conductor/history.ts';
 import { Monitor } from '../conductor/monitor.ts';
-import { queryAuditEvents } from '../db/audit-log.ts';
+import { queryAuditEvents, type SqliteAuditLog } from '../db/audit-log.ts';
 import { openDatabase, type ConductorDb } from '../db/database.ts';
-import { sequenceResult, zoneWatering, type SequenceResultRow } from '../db/schema.ts';
+import type { SequenceResult } from '../db/model.ts';
 import { beginSession, type Session } from '../db/session.ts';
 import { Notifier, type Notification } from '../notify/notifier.ts';
 import { SimWorld, type WorldOptions } from './world.ts';
@@ -24,7 +24,7 @@ export interface SimContext {
   note(text: string): void;
   /** Kills the conductor without a clean shutdown (the database keeps whatever was committed). */
   crash(): Promise<void>;
-  /** Starts the conductor again from the saved state. */
+  /** Starts the conductor again from what the database holds. */
   restart(): Promise<void>;
 }
 
@@ -54,7 +54,7 @@ export interface SimResult {
   notifications: Notification[];
   timeZone: string;
   /** What the database holds at the end: each watering sequence's outcome and the watering ledger. */
-  stored: { sequences: SequenceResultRow[]; ledger: { zoneKey: string; startedAt: Date; minutes: number; sequenceId: string | null }[] };
+  stored: { sequences: SequenceResult[]; ledger: { zoneKey: string; startedAt: Date; minutes: number; sequenceId: string | null }[] };
 }
 
 export const SIM_TIME_ZONE = 'America/Chicago';
@@ -113,10 +113,12 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
   let notifier: Notifier | undefined;
   let session: Session | undefined;
   /** Where simulation notes go: the current (or last) run's audit trail. */
-  let trail: AuditSink | undefined;
+  let trail: SqliteAuditLog | undefined;
 
-  const boot = () => {
-    session = beginSession(db, { config, mode: 'continuous', now: () => clock.now() });
+  const boot = async () => {
+    // The crashed run's last events must be written before the new run looks for them.
+    await trail?.flush();
+    session = await beginSession(db, { config, mode: 'continuous', now: () => clock.now() });
     notifier = new Notifier({ options: config.notifications, deliver: (n) => notifications.push(n), clock });
     trail = session.audit;
     const audit = teeAudit(session.audit, notifier);
@@ -156,10 +158,11 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
     restart: async () => boot(),
   };
 
-  boot();
+  await boot();
   for (const step of [...scenario.timeline].sort((a, b) => a.at - b.at)) {
     await clock.advanceTo(new Date(start.getTime() + step.at * MINUTE_MS));
     if (step.note) ctx.note(step.note);
+    await trail?.flush();
     await step.run?.(ctx);
     world.update();
   }
@@ -168,16 +171,17 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
   if (monitor) {
     await halt();
     trail?.record('service.stopped', { reason: 'end of simulation' });
-    session?.end('end of simulation');
+    await session?.end('end of simulation');
   }
+  await trail?.flush();
   const stored = {
-    sequences: db.select().from(sequenceResult).all(),
-    ledger: db
-      .select({ zoneKey: zoneWatering.zoneKey, startedAt: zoneWatering.startedAt, minutes: zoneWatering.minutes, sequenceId: zoneWatering.sequenceId })
-      .from(zoneWatering)
-      .all(),
+    sequences: session ? await session.store.sequenceResults() : [],
+    ledger: await db.prisma.zoneWatering.findMany({
+      orderBy: { id: 'asc' },
+      select: { zoneKey: true, startedAt: true, minutes: true, sequenceId: true },
+    }),
   };
-  const events = queryAuditEvents(db);
-  db.$client.close();
+  const events = await queryAuditEvents(db);
+  await db.close();
   return { scenario, events, notifications, timeZone: SIM_TIME_ZONE, stored };
 };

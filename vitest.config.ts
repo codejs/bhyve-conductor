@@ -11,7 +11,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
-      exclude: ['src/test/**', 'src/scripts/**', 'src/**/types.ts'],
+      // The Prisma client is generated (npm run db:generate), not written here.
+      exclude: ['src/test/**', 'src/scripts/**', 'src/**/types.ts', 'src/db/generated/**'],
     },
   },
 });

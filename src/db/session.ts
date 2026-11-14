@@ -3,7 +3,7 @@ import type { ConductorConfig } from '../conductor/config.ts';
 import type { StoredState } from '../conductor/store.ts';
 import { SqliteAuditLog } from './audit-log.ts';
 import type { ConductorDb } from './database.ts';
-import type { RunMode } from './schema.ts';
+import type { RunMode } from './model.ts';
 import { beginServiceRun, endServiceRun, recordHeartbeat, type UncleanShutdown } from './service-run.ts';
 import { SqliteStore } from './store.ts';
 
@@ -32,17 +32,17 @@ export interface Session {
   /** Set if the previous run ended without a clean stop. */
   unclean?: Omit<UncleanShutdown, 'runId'>;
   /** Call after every poll. */
-  heartbeat(): void;
-  /** A clean stop. */
-  end(reason: string): void;
+  heartbeat(): Promise<void>;
+  /** A clean stop (waits for the audit trail to be written first). */
+  end(reason: string): Promise<void>;
 }
 
 const MINUTE_MS = 60_000;
 
-export const beginSession = (db: ConductorDb, o: SessionOptions): Session => {
+export const beginSession = async (db: ConductorDb, o: SessionOptions): Promise<Session> => {
   const startedAt = o.now();
   const dryRun = o.config.dryRun;
-  const { runId, unclean } = beginServiceRun(db, {
+  const { runId, unclean } = await beginServiceRun(db, {
     startedAt,
     mode: o.mode,
     dryRun,
@@ -50,22 +50,26 @@ export const beginSession = (db: ConductorDb, o: SessionOptions): Session => {
     ...(o.pid !== undefined ? { pid: o.pid } : {}),
   });
   const store = new SqliteStore(db, { serviceRunId: runId });
-  if (!dryRun) store.syncZones(o.config.zones, startedAt);
+  if (!dryRun) await store.syncZones(o.config.zones, startedAt);
   // The same window WateringHistory.prune keeps: the longest cooldown, and at least the 24 h cap.
   const longestCooldown = Math.max(0, ...o.config.zones.map((z) => z.cooldownMinutes));
-  const state = store.loadState(startedAt, longestCooldown * MINUTE_MS, { repair: !dryRun });
+  const state = await store.loadState(startedAt, longestCooldown * MINUTE_MS, { repair: !dryRun });
 
   const legacy = o.legacyLastEvent;
   const crashed =
     unclean ?? (!dryRun && legacy && legacy.type !== 'service.stopped' ? { lastEvent: legacy.type, lastEventAt: legacy.ts } : undefined);
 
+  const audit = new SqliteAuditLog(db, { now: o.now, serviceRunId: runId });
   return {
     runId,
-    audit: new SqliteAuditLog(db, { now: o.now, serviceRunId: runId }),
+    audit,
     store,
     state,
     ...(crashed ? { unclean: { lastEvent: crashed.lastEvent, lastEventAt: crashed.lastEventAt } } : {}),
     heartbeat: () => recordHeartbeat(db, runId, o.now()),
-    end: (reason) => endServiceRun(db, runId, o.now(), reason),
+    end: async (reason) => {
+      await audit.flush();
+      await endServiceRun(db, runId, o.now(), reason);
+    },
   };
 };

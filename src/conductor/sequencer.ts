@@ -46,7 +46,7 @@ export interface SequencerDeps {
   history: WateringHistory;
   audit: AuditSink;
   health: ConnectionHealth;
-  /** Where each step is saved (default: nowhere). Expected not to throw (see guardStore). */
+  /** Where each step is saved (default: nowhere). Each step is awaited. Expected not to reject (see guardStore). */
   store?: SequenceJournal;
   options: RecoveryOptions;
   now: () => Date;
@@ -124,7 +124,7 @@ export class Sequencer {
       plannedMinutes: round1(seq.waves.reduce((sum, w) => sum + minutesOf(w), 0)),
       ...details,
     });
-    this.#store.sequenceStarted(seq, zonesOf(command, decisions));
+    await this.#store.sequenceStarted(seq, zonesOf(command, decisions));
     return this.#attempt(seq, false);
   }
 
@@ -151,16 +151,16 @@ export class Sequencer {
           sentAt: since.toISOString(),
           reason: 'found in flight after a restart',
         });
-        this.#recordDelivered(seq, index, since, 'assumed');
+        await this.#recordDelivered(seq, index, since, 'assumed');
         if (seq.nextWave >= seq.waves.length) {
-          this.#complete(seq);
+          await this.#complete(seq);
           continue;
         }
       }
 
       const overdueMin = (now.getTime() - seq.dueAt.getTime()) / MINUTE_MS;
       if (overdueMin > this.#deps.options.resumeWindowMinutes) {
-        this.#abandon(seq, `too late to resume after a restart: cycle ${seq.nextWave + 1} was due ${Math.round(overdueMin)} min ago`);
+        await this.#abandon(seq, `too late to resume after a restart: cycle ${seq.nextWave + 1} was due ${Math.round(overdueMin)} min ago`);
         continue;
       }
       this.#deps.audit.record('sequence.resumed', {
@@ -209,7 +209,7 @@ export class Sequencer {
       const check = await this.#precheck(seq.deviceId);
       if (!check.go) {
         if (check.abandon) {
-          this.#abandon(seq, check.reason);
+          await this.#abandon(seq, check.reason);
           return 'abandoned';
         }
         audit.record('wave.deferred', { ...cycle, reason: check.reason });
@@ -217,10 +217,10 @@ export class Sequencer {
       }
     }
 
-    // Mark the wave in flight *before* sending (saved synchronously), so a crash from here on is detectable at restart.
+    // Mark the wave in flight and wait until it is saved *before* sending, so a crash from here on is detectable at restart.
     const sentAt = this.#deps.now();
     seq.inFlight = { wave: index, since: sentAt };
-    this.#store.waveSending(seq, index, sentAt);
+    await this.#store.waveSending(seq, index, sentAt);
 
     let acknowledged = false;
     let onAck: () => void = () => {};
@@ -266,10 +266,10 @@ export class Sequencer {
         audit.record('wave.confirmed', { ...cycle, via: delivery });
       }
       log.info(`Watering device ${seq.deviceId} (${this.#label(seq)}): ${summary(wave)}`);
-      this.#recordDelivered(seq, index, sentAt, delivery === 'unknown' ? 'unconfirmed' : delivery);
+      await this.#recordDelivered(seq, index, sentAt, delivery === 'unknown' ? 'unconfirmed' : delivery);
 
       if (seq.nextWave >= seq.waves.length) {
-        this.#complete(seq);
+        await this.#complete(seq);
         this.#scheduleFinished(seq, minutesOf(wave) * MINUTE_MS);
       } else {
         this.#schedule(seq, seq.dueAt.getTime() - this.#deps.now().getTime());
@@ -353,12 +353,12 @@ export class Sequencer {
 
   async #retryOrAbandon(seq: PendingSequence, reason: string): Promise<StartResult> {
     seq.attempts++;
-    this.#store.waveFailed(seq, seq.nextWave);
+    await this.#store.waveFailed(seq, seq.nextWave);
     const now = this.#deps.now();
     const overdueMin = (now.getTime() - seq.dueAt.getTime()) / MINUTE_MS;
     const windowMin = this.#deps.options.retryWindowMinutes;
     if (overdueMin >= windowMin) {
-      this.#abandon(seq, `gave up on ${this.#label(seq)} after ${seq.attempts} attempt(s) over ${Math.round(overdueMin)} min: ${reason}`);
+      await this.#abandon(seq, `gave up on ${this.#label(seq)} after ${seq.attempts} attempt(s) over ${Math.round(overdueMin)} min: ${reason}`);
       return 'abandoned';
     }
     const backoff = RETRY_DELAYS_MINUTES[Math.min(seq.attempts, RETRY_DELAYS_MINUTES.length) - 1] ?? 1;
@@ -388,14 +388,14 @@ export class Sequencer {
   }
 
   /** Counts wave `index` (sent at `at`) as delivered; the next wave is due when it has run plus the soak. */
-  #recordDelivered(seq: PendingSequence, index: number, at: Date, delivery: WaveDelivery): void {
+  async #recordDelivered(seq: PendingSequence, index: number, at: Date, delivery: WaveDelivery): Promise<void> {
     const wave = seq.waves[index] ?? [];
     for (const run of wave) {
       this.#deps.history.record({ zoneKey: zoneKey({ deviceId: seq.deviceId, station: run.station }), at, minutes: run.runTime });
     }
     // The wave's stations run back to back; the next wave starts after they finish plus the soak.
     const nextDueAt = index + 1 < seq.waves.length ? new Date(at.getTime() + (minutesOf(wave) + seq.soakMinutes) * MINUTE_MS) : undefined;
-    this.#store.waveDelivered(seq, index, delivery, at, nextDueAt);
+    await this.#store.waveDelivered(seq, index, delivery, at, nextDueAt);
     delete seq.inFlight;
     seq.nextWave = index + 1;
     seq.attempts = 0;
@@ -419,7 +419,7 @@ export class Sequencer {
     this.#finishTimers.add(timer);
   }
 
-  #complete(seq: PendingSequence): void {
+  async #complete(seq: PendingSequence): Promise<void> {
     this.#deps.audit.record('sequence.completed', {
       sequence: seq.id,
       device: seq.deviceId,
@@ -427,11 +427,11 @@ export class Sequencer {
       cycles: seq.waves.length,
       deliveredMinutes: round1(seq.waves.reduce((sum, w) => sum + minutesOf(w), 0)),
     });
-    this.#store.sequenceCompleted(seq, this.#deps.now());
+    await this.#store.sequenceCompleted(seq, this.#deps.now());
     this.#remove(seq);
   }
 
-  #abandon(seq: PendingSequence, reason: string): void {
+  async #abandon(seq: PendingSequence, reason: string): Promise<void> {
     const delivered = seq.waves.slice(0, seq.nextWave).reduce((sum, w) => sum + minutesOf(w), 0);
     const planned = seq.waves.reduce((sum, w) => sum + minutesOf(w), 0);
     this.#deps.audit.record('sequence.abandoned', {
@@ -448,7 +448,7 @@ export class Sequencer {
       `Abandoned watering sequence ${seq.id} on device ${seq.deviceId} after ${seq.nextWave}/${seq.waves.length} cycle(s) ` +
         `(${round1(delivered)} of ${round1(planned)} min): ${reason}`,
     );
-    this.#store.sequenceAbandoned(seq, this.#deps.now(), reason);
+    await this.#store.sequenceAbandoned(seq, this.#deps.now(), reason);
     this.#remove(seq);
   }
 

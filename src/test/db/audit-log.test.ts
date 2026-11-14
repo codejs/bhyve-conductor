@@ -2,9 +2,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { lastAuditEventOf, queryAuditEvents, readAuditSource, SqliteAuditLog } from '../../db/audit-log.ts';
+import { filterValue, lastAuditEventOf, queryAuditEvents, readAuditSource, SqliteAuditLog } from '../../db/audit-log.ts';
 import { openDatabase, type ConductorDb } from '../../db/database.ts';
-import { auditEvent } from '../../db/schema.ts';
 import { log } from '../../log.ts';
 
 const T0 = new Date('2026-07-01T11:00:00.000Z');
@@ -21,83 +20,142 @@ describe('SqliteAuditLog', () => {
     audit = new SqliteAuditLog(db, { now: () => now });
   });
 
-  afterEach(() => {
-    if (db.$client.isOpen) db.$client.close();
+  afterEach(async () => {
+    await db.close();
   });
 
-  it('stores events in order, with their time and data, in the JSONL event shape', () => {
+  it('stores events in the order they are recorded, with their time and data, in the JSONL event shape', async () => {
     audit.record('service.started', { mode: 'continuous', dryRun: false, zones: 2 });
     now = T(1);
     audit.record('wave.sent', { sequence: 'abc', device: 'dev1', stations: [{ station: 1, runTime: 10 }] });
     audit.record('service.stopped');
+    await audit.flush();
 
-    expect(queryAuditEvents(db)).toEqual([
+    expect(await queryAuditEvents(db)).toEqual([
       { ts: T0.toISOString(), type: 'service.started', mode: 'continuous', dryRun: false, zones: 2 },
       { ts: T(1).toISOString(), type: 'wave.sent', sequence: 'abc', device: 'dev1', stations: [{ station: 1, runTime: 10 }] },
       { ts: T(1).toISOString(), type: 'service.stopped' },
     ]);
   });
 
-  it('keeps errors and dates readable', () => {
+  it('takes the time and the data when the event is recorded, not when it is written', async () => {
+    const data = { reason: 'first' };
+    audit.record('service.stopped', data);
+    data.reason = 'changed afterwards';
+    now = T(5);
+    await audit.flush();
+
+    expect(await queryAuditEvents(db)).toEqual([{ ts: T0.toISOString(), type: 'service.stopped', reason: 'first' }]);
+  });
+
+  it('keeps errors and dates readable', async () => {
     audit.record('poll.failed', { error: new Error('boom'), at: T(5) });
+    await audit.flush();
 
-    expect(queryAuditEvents(db)).toEqual([{ ts: T0.toISOString(), type: 'poll.failed', error: 'boom', at: T(5).toISOString() }]);
+    expect(await queryAuditEvents(db)).toEqual([{ ts: T0.toISOString(), type: 'poll.failed', error: 'boom', at: T(5).toISOString() }]);
   });
 
-  it('tags events with the service run', () => {
-    const run = db.$client.prepare(`INSERT INTO service_run (started_at, mode, dry_run, config_hash, config_json, heartbeat_at) VALUES (?, 'once', 1, 'h', '{}', ?)`).run(T0.toISOString(), T0.toISOString());
-    const runId = Number(run.lastInsertRowid);
-    new SqliteAuditLog(db, { now: () => now, serviceRunId: runId }).record('service.started');
-    audit.record('simulation.note', { note: 'no run' });
+  it('fills the filter columns from the payload, as text', async () => {
+    audit.record('wave.sent', { sequence: 's1', device: 12345, zone: ['not', 'a', 'string'] });
+    audit.record('service.stopped');
+    await audit.flush();
 
-    expect(db.select({ type: auditEvent.type, run: auditEvent.serviceRunId }).from(auditEvent).all()).toEqual([
-      { type: 'service.started', run: runId },
-      { type: 'simulation.note', run: null },
+    expect(await db.prisma.auditEvent.findMany({ orderBy: { id: 'asc' }, select: { deviceId: true, zoneKey: true, sequenceId: true } })).toEqual([
+      { deviceId: '12345', zoneKey: '["not","a","string"]', sequenceId: 's1' },
+      { deviceId: null, zoneKey: null, sequenceId: null },
     ]);
-    expect(queryAuditEvents(db, { serviceRunId: runId }).map((e) => e.type)).toEqual(['service.started']);
   });
 
-  it('logs but never throws when the database cannot be written', () => {
+  it('tags events with the service run', async () => {
+    const run = await db.prisma.serviceRun.create({ data: { startedAt: T0, mode: 'once', dryRun: true, configHash: 'h', config: {}, heartbeatAt: T0 }, select: { id: true } });
+    const tagged = new SqliteAuditLog(db, { now: () => now, serviceRunId: run.id });
+    tagged.record('service.started');
+    audit.record('simulation.note', { note: 'no run' });
+    await Promise.all([tagged.flush(), audit.flush()]);
+
+    expect(await db.prisma.auditEvent.findMany({ orderBy: { id: 'asc' }, select: { type: true, serviceRunId: true } })).toEqual([
+      { type: 'service.started', serviceRunId: run.id },
+      { type: 'simulation.note', serviceRunId: null },
+    ]);
+    expect((await queryAuditEvents(db, { serviceRunId: run.id })).map((e) => e.type)).toEqual(['service.started']);
+  });
+
+  it('logs but never throws when the database cannot be written, and keeps going', async () => {
     const error = vi.spyOn(log, 'error').mockImplementation(() => {});
-    db.$client.close();
+    db.sqlite.exec('PRAGMA query_only = ON');
 
     expect(() => audit.record('service.started')).not.toThrow();
+    await audit.flush();
     expect(error).toHaveBeenCalledWith('Could not write audit event service.started to the database', expect.anything());
+
+    db.sqlite.exec('PRAGMA query_only = OFF');
+    audit.record('service.stopped');
+    await audit.flush();
+    expect((await queryAuditEvents(db)).map((e) => e.type)).toEqual(['service.stopped']);
   });
+
+  it('logs an event it cannot even serialize, and records the next one', async () => {
+    const error = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    audit.record('poll.failed', circular);
+    audit.record('service.stopped');
+    await audit.flush();
+
+    expect(error).toHaveBeenCalledWith('Could not record audit event poll.failed', expect.any(TypeError));
+    expect((await queryAuditEvents(db)).map((e) => e.type)).toEqual(['service.stopped']);
+  });
+});
+
+describe('filterValue', () => {
+  it.each([
+    [undefined, null],
+    [null, null],
+    ['dev1', 'dev1'],
+    [12345, '12345'],
+    [true, 'true'],
+    [{ a: 1 }, '{"a":1}'],
+  ])('%o → %o', (value, expected) => expect(filterValue(value)).toBe(expected));
 });
 
 describe('queryAuditEvents / lastAuditEventOf', () => {
   let db: ConductorDb;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db = openDatabase(':memory:');
-    const at = (min: number) => ({ now: () => T(min) });
-    new SqliteAuditLog(db, at(0)).record('sequence.started', { sequence: '3f9a1c2e-0000-4000-8000-000000000001' });
-    new SqliteAuditLog(db, at(10)).record('wave.sent', { sequence: '3f9a1c2e-0000-4000-8000-000000000001' });
-    new SqliteAuditLog(db, at(20)).record('wave.sent', { sequence: '77aa0000-0000-4000-8000-000000000002' });
-    new SqliteAuditLog(db, at(30)).record('simulation.note', { note: 'the power fails' });
+    let now = T(0);
+    const audit = new SqliteAuditLog(db, { now: () => now });
+    audit.record('sequence.started', { sequence: '3f9a1c2e-0000-4000-8000-000000000001' });
+    now = T(10);
+    audit.record('wave.sent', { sequence: '3f9a1c2e-0000-4000-8000-000000000001' });
+    now = T(20);
+    audit.record('wave.sent', { sequence: '77aa0000-0000-4000-8000-000000000002' });
+    now = T(30);
+    audit.record('simulation.note', { note: 'the power fails' });
+    await audit.flush();
   });
 
-  afterEach(() => {
-    db.$client.close();
+  afterEach(async () => {
+    await db.close();
   });
 
-  it('filters by time (inclusive), sequence id or its beginning, and type', () => {
-    expect(queryAuditEvents(db, { since: T(10), until: T(20) }).map((e) => e.ts)).toEqual([T(10).toISOString(), T(20).toISOString()]);
-    expect(queryAuditEvents(db, { sequence: '3f9a1c2e' }).map((e) => e.type)).toEqual(['sequence.started', 'wave.sent']);
-    expect(queryAuditEvents(db, { sequence: '3f9a1c2e-0000-4000-8000-000000000001' })).toHaveLength(2);
-    expect(queryAuditEvents(db, { sequence: '77' })).toHaveLength(1);
-    expect(queryAuditEvents(db, { excludeTypes: ['wave.sent', 'simulation.note'] }).map((e) => e.type)).toEqual(['sequence.started']);
+  it('filters by time (inclusive), sequence id or its beginning, and type', async () => {
+    expect((await queryAuditEvents(db, { since: T(10), until: T(20) })).map((e) => e.ts)).toEqual([T(10).toISOString(), T(20).toISOString()]);
+    expect((await queryAuditEvents(db, { sequence: '3f9a1c2e' })).map((e) => e.type)).toEqual(['sequence.started', 'wave.sent']);
+    expect(await queryAuditEvents(db, { sequence: '3f9a1c2e-0000-4000-8000-000000000001' })).toHaveLength(2);
+    expect(await queryAuditEvents(db, { sequence: '77' })).toHaveLength(1);
+    expect((await queryAuditEvents(db, { excludeTypes: ['wave.sent', 'simulation.note'] })).map((e) => e.type)).toEqual(['sequence.started']);
   });
 
-  it('finds the most recent matching event', () => {
-    expect(lastAuditEventOf(db)?.type).toBe('simulation.note');
-    expect(lastAuditEventOf(db, { excludeTypes: ['simulation.note'] })).toEqual({
+  it('finds the most recent matching event', async () => {
+    expect((await lastAuditEventOf(db))?.type).toBe('simulation.note');
+    expect(await lastAuditEventOf(db, { excludeTypes: ['simulation.note'] })).toEqual({
       ts: T(20).toISOString(),
       type: 'wave.sent',
       sequence: '77aa0000-0000-4000-8000-000000000002',
     });
-    expect(lastAuditEventOf(db, { since: T(31) })).toBeUndefined();
+    expect(await lastAuditEventOf(db, { since: T(31) })).toBeUndefined();
   });
 });
 
@@ -106,6 +164,7 @@ describe('readAuditSource', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'conductor-audit-source-'));
+    vi.spyOn(log, 'info').mockImplementation(() => {});
   });
 
   afterEach(async () => {
@@ -118,14 +177,16 @@ describe('readAuditSource', () => {
     const audit = new SqliteAuditLog(service, { now: () => T0 });
     audit.record('service.started');
     audit.record('wave.sent', { sequence: 'abc123' });
+    await audit.flush();
 
     const { events, skipped } = await readAuditSource(path, { sequence: 'abc' });
     audit.record('service.stopped'); // the service is unaffected
+    await audit.flush();
 
     expect(skipped).toBe(0);
     expect(events.map((e) => e.type)).toEqual(['wave.sent']);
-    expect(queryAuditEvents(service)).toHaveLength(3);
-    service.$client.close();
+    expect(await queryAuditEvents(service)).toHaveLength(3);
+    await service.close();
   });
 
   it('reads a JSON Lines trail, counting lines it cannot read', async () => {

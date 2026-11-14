@@ -1,5 +1,5 @@
 import { errorMessage, type AuditSink } from '../audit/audit.ts';
-import type { WaveDelivery } from '../db/schema.ts';
+import type { WaveDelivery } from '../db/model.ts';
 import { log } from '../log.ts';
 import type { MoistureReading } from '../sensors/types.ts';
 import type { AlertState } from './alerts.ts';
@@ -8,12 +8,13 @@ import type { PendingSequence } from './state.ts';
 import type { WaterBudget } from './water-budget.ts';
 
 /**
- * What the conductor persists, one step at a time (implemented over SQLite by src/db/store.ts). Each call
- * is one transaction, made at the moment the step happens. In particular `waveSending` is on disk before
- * the watering command leaves, so a crash mid-send is detectable at restart.
+ * What the conductor persists, one step at a time (implemented with Prisma over SQLite by src/db/store.ts).
+ * Each call is one transaction, made when the step happens, and the caller awaits it. In particular
+ * `waveSending` is on disk before the watering command leaves, so a crash mid-send is detectable at restart.
  *
- * Implementations may throw. The Monitor and Sequencer only ever see a `guardStore()` wrapper, which turns a
- * failure into a log line and one `state.save_failed` audit event per outage; watering carries on.
+ * Implementations may reject. The Monitor and Sequencer only ever see a `guardStore()` wrapper, which writes
+ * in call order, turns a failure into a log line and one `state.save_failed` audit event per outage, and
+ * never rejects: watering carries on.
  */
 
 export type { WaveDelivery };
@@ -48,25 +49,25 @@ export interface SavedZoneSpell extends ZoneSpell {
 /** The Sequencer's steps. */
 export interface SequenceJournal {
   /** Planned: the sequence, why each zone is in it, its waves. Wave 0 is due at `seq.dueAt`. */
-  sequenceStarted(seq: PendingSequence, zones: readonly SequenceZone[]): void;
+  sequenceStarted(seq: PendingSequence, zones: readonly SequenceZone[]): Promise<void>;
   /** About to send the wave. Must be durable before the command is sent. */
-  waveSending(seq: PendingSequence, wave: number, at: Date): void;
+  waveSending(seq: PendingSequence, wave: number, at: Date): Promise<void>;
   /** An attempt at the wave failed (send failed, device idle, deferred); it is pending again. */
-  waveFailed(seq: PendingSequence, wave: number): void;
+  waveFailed(seq: PendingSequence, wave: number): Promise<void>;
   /** The wave counts as delivered: its runs go into the watering ledger. `nextDueAt` is unset for the last wave. */
-  waveDelivered(seq: PendingSequence, wave: number, delivery: WaveDelivery, sentAt: Date, nextDueAt: Date | undefined): void;
-  sequenceCompleted(seq: PendingSequence, at: Date): void;
+  waveDelivered(seq: PendingSequence, wave: number, delivery: WaveDelivery, sentAt: Date, nextDueAt: Date | undefined): Promise<void>;
+  sequenceCompleted(seq: PendingSequence, at: Date): Promise<void>;
   /** The rest of the sequence won't be sent. */
-  sequenceAbandoned(seq: PendingSequence, at: Date, reason: string): void;
+  sequenceAbandoned(seq: PendingSequence, at: Date, reason: string): Promise<void>;
 }
 
 /** Everything the conductor persists. */
 export interface ConductorStore extends SequenceJournal {
   /** Replaces the open alert conditions. */
-  saveAlerts(alerts: AlertState): void;
+  saveAlerts(alerts: AlertState): Promise<void>;
   /** Every configured zone's spells after a poll. */
-  saveZoneSpells(spells: readonly ZoneSpell[], at: Date): void;
-  recordReadings(readings: readonly MoistureReading[], polledAt: Date): void;
+  saveZoneSpells(spells: readonly ZoneSpell[], at: Date): Promise<void>;
+  recordReadings(readings: readonly MoistureReading[], polledAt: Date): Promise<void>;
 }
 
 /** What a previous run left, to carry on from. */
@@ -78,7 +79,7 @@ export interface StoredState {
   zoneSpells: SavedZoneSpell[];
 }
 
-const nothing = (): void => {};
+const nothing = async (): Promise<void> => {};
 
 /** Persists nothing (dry runs, and tests that don't look at storage). */
 export const noStore: ConductorStore = {
@@ -100,27 +101,51 @@ const TRANSIENT_CODES = new Set([5, 6, 8, 10, 13, 14]);
 /** Writes kept for replay during a storage outage (the oldest are dropped beyond this). */
 export const MAX_BACKLOG = 1_000;
 
-/** Whether a failed write may succeed later (drizzle wraps the driver's error: look through `cause`). */
-export const isTransientStorageError = (err: unknown): boolean => {
-  for (let e: unknown = err; e instanceof Error; e = e.cause) {
-    const code = (e as { errcode?: unknown }).errcode;
-    if (typeof code === 'number') return TRANSIENT_CODES.has(code & 0xff);
+/**
+ * What SQLite said about a failed write, wherever it is in the error: node:sqlite's own error (`errcode`),
+ * the driver adapter's (`cause` = { kind, extendedCode }), or Prisma's (`meta.driverAdapterError.cause`).
+ */
+export const storageErrorOf = (err: unknown): { code?: number; kind?: string; message?: string } | undefined => {
+  const seen = new Set<unknown>();
+  for (let e: unknown = err; e && typeof e === 'object' && !seen.has(e); ) {
+    seen.add(e);
+    const o = e as { errcode?: unknown; kind?: unknown; extendedCode?: unknown; message?: unknown; cause?: unknown; meta?: { driverAdapterError?: unknown } };
+    if (typeof o.errcode === 'number') return { code: o.errcode, ...(typeof o.message === 'string' ? { message: o.message } : {}) };
+    if (typeof o.kind === 'string') {
+      return {
+        kind: o.kind,
+        ...(typeof o.extendedCode === 'number' ? { code: o.extendedCode } : {}),
+        ...(typeof o.message === 'string' ? { message: o.message } : {}),
+      };
+    }
+    e = o.meta?.driverAdapterError ?? o.cause;
   }
-  return false;
+  return undefined;
+};
+
+/** Whether a failed write may succeed later. */
+export const isTransientStorageError = (err: unknown): boolean => {
+  const s = storageErrorOf(err);
+  if (!s) return false;
+  if (s.kind === 'SocketTimeout') return true; // busy
+  return s.code !== undefined && TRANSIENT_CODES.has(s.code & 0xff);
 };
 
 const describeError = (err: unknown): string => {
-  const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined;
-  return cause ?? errorMessage(err);
+  const s = storageErrorOf(err);
+  if (s?.message) return s.message;
+  if (s?.kind) return s.kind;
+  // Prisma's messages start with where the call came from; the reason is on the last line.
+  return (errorMessage(err).trim().split('\n').at(-1) ?? '').trim() || errorMessage(err);
 };
 
 /**
- * Wraps a store so that it never throws, and so that a storage outage (disk full, I/O error, locked) loses
- * nothing while the process runs: a write that fails for such a reason is kept, with a copy of its
- * arguments, and replayed in order before the next write. Once storage works again, the database catches
- * up with everything that happened meanwhile (cooldowns and daily caps would otherwise under-count after a
- * restart). A write that fails for good (a constraint, a bug) is logged and skipped, so it can't block the
- * rest. Replays are in memory: a restart during an outage loses what wasn't written.
+ * Wraps a store so that it never rejects and writes in call order, and so that a storage outage (disk full,
+ * I/O error, locked) loses nothing while the process runs: a write that fails for such a reason is kept, with
+ * a copy of its arguments, and replayed in order before the next write. Once storage works again, the
+ * database catches up with everything that happened meanwhile (cooldowns and daily caps would otherwise
+ * under-count after a restart). A write that fails for good (a constraint, a bug) is logged and skipped, so it
+ * can't block the rest. Replays are in memory: a restart during an outage loses what wasn't written.
  *
  * Like ConnectionHealth, it audits transitions only: one `state.save_failed` when saving starts failing,
  * one `state.save_restored` when everything is written again.
@@ -128,6 +153,7 @@ const describeError = (err: unknown): string => {
 export const guardStore = (store: ConductorStore, audit: AuditSink, now: () => Date = () => new Date()): ConductorStore => {
   const backlog: { method: keyof ConductorStore; args: unknown[] }[] = [];
   let outage: { since: Date; failures: number; lastError: string } | undefined;
+  let queue: Promise<void> = Promise.resolve();
 
   const failed = (method: keyof ConductorStore, err: unknown, willRetry: boolean): void => {
     const error = describeError(err);
@@ -142,17 +168,15 @@ export const guardStore = (store: ConductorStore, audit: AuditSink, now: () => D
     audit.record('state.save_failed', { step: method, error });
   };
 
-  const apply = (method: keyof ConductorStore, args: unknown[]): void => {
-    (store[method] as (...a: unknown[]) => void)(...args);
-  };
+  const apply = (method: keyof ConductorStore, args: unknown[]): Promise<void> => (store[method] as (...a: unknown[]) => Promise<void>)(...args);
 
   /** Writes the backlog in order; stops at a failure that may clear up. True if everything is written. */
-  const drain = (): boolean => {
+  const drain = async (): Promise<boolean> => {
     while (backlog.length > 0) {
       const op = backlog[0];
       if (!op) break;
       try {
-        apply(op.method, op.args);
+        await apply(op.method, op.args);
       } catch (err) {
         if (isTransientStorageError(err)) {
           failed(op.method, err, true);
@@ -173,31 +197,38 @@ export const guardStore = (store: ConductorStore, audit: AuditSink, now: () => D
     outage = undefined;
   };
 
-  const guarded = {} as Record<keyof ConductorStore, (...args: unknown[]) => void>;
-  for (const method of METHODS) {
-    guarded[method] = (...args: unknown[]) => {
-      if (backlog.length === 0) {
-        try {
-          apply(method, args);
-          restored();
-          return;
-        } catch (err) {
-          if (!isTransientStorageError(err)) {
-            failed(method, err, false);
-            return;
-          }
-          failed(method, err, true);
-          // Copy the arguments now: the caller goes on changing its objects (the sequence moves on).
-          backlog.push({ method, args: structuredClone(args) });
+  const write = async (method: keyof ConductorStore, args: unknown[]): Promise<void> => {
+    if (backlog.length === 0) {
+      try {
+        await apply(method, args);
+        restored();
+      } catch (err) {
+        if (!isTransientStorageError(err)) {
+          failed(method, err, false);
           return;
         }
+        failed(method, err, true);
+        backlog.push({ method, args });
       }
-      backlog.push({ method, args: structuredClone(args) });
-      if (backlog.length > MAX_BACKLOG) {
-        const dropped = backlog.shift();
-        log.error(`Storage outage: dropped the oldest unsaved ${dropped?.method ?? 'write'} (more than ${MAX_BACKLOG} waiting)`);
-      }
-      if (drain()) restored();
+      return;
+    }
+    backlog.push({ method, args });
+    if (backlog.length > MAX_BACKLOG) {
+      const dropped = backlog.shift();
+      log.error(`Storage outage: dropped the oldest unsaved ${dropped?.method ?? 'write'} (more than ${MAX_BACKLOG} waiting)`);
+    }
+    if (await drain()) restored();
+  };
+
+  const guarded = {} as Record<keyof ConductorStore, (...args: unknown[]) => Promise<void>>;
+  for (const method of METHODS) {
+    guarded[method] = (...args: unknown[]) => {
+      // Copy the arguments now: the caller goes on changing its objects (the sequence moves on), and a write
+      // may wait behind others or be replayed later.
+      const copy = structuredClone(args);
+      const done = queue.then(() => write(method, copy));
+      queue = done.catch(() => {});
+      return done;
     };
   }
   return guarded as unknown as ConductorStore;

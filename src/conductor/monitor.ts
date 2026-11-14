@@ -35,7 +35,7 @@ export interface MonitorDeps {
    */
   store?: ConductorStore;
   /** Called after every poll, successful or not (the service run's heartbeat). */
-  heartbeat?: () => void;
+  heartbeat?: () => void | Promise<void>;
   /** Enables forecast-based amounts. Without it, dry zones get their fixed `runMinutes`. */
   weather?: WeatherProvider;
   /** Audit trail for connectivity and watering events. */
@@ -150,14 +150,14 @@ export class Monitor {
     const now = this.#now();
 
     const readings = await this.#readSensors();
-    this.#store.recordReadings([...readings.values()], now);
+    await this.#store.recordReadings([...readings.values()], now);
     let alertsChanged = this.#alerts.checkReadings(config.zones, readings);
     let devices = await this.#periodicDeviceCheck(now);
 
     let decisions = config.zones.map((zone) => evaluateZone(zone, readings, history, now));
     this.#trackDrySpells(decisions, now);
     this.#trackSensorData(decisions, now);
-    this.#store.saveZoneSpells(
+    await this.#store.saveZoneSpells(
       config.zones.map((z) => {
         const drySince = this.#drySince.get(z.key);
         const noDataSince = this.#noDataSince.get(z.key);
@@ -189,7 +189,7 @@ export class Monitor {
           this.#lastDeviceCheck = now;
         } catch (err) {
           this.#health.failed('bhyve', err);
-          if (alertsChanged) this.#saveAlerts();
+          if (alertsChanged) await this.#saveAlerts();
           throw err;
         }
         alertsChanged = this.#alerts.checkDevices(devices) || alertsChanged;
@@ -199,7 +199,7 @@ export class Monitor {
     }
     decisions.forEach(logDecision);
     this.#auditDecisionChanges(decisions);
-    if (alertsChanged) this.#saveAlerts();
+    if (alertsChanged) await this.#saveAlerts();
     this.#pruneHistory(now);
 
     const sent: DeviceCommand[] = [];
@@ -258,7 +258,7 @@ export class Monitor {
     try {
       const devices = await this.#deps.bhyve.getDevices();
       this.#health.ok('bhyve');
-      if (this.#alerts.checkDevices(devices)) this.#saveAlerts();
+      if (this.#alerts.checkDevices(devices)) await this.#saveAlerts();
       return devices;
     } catch (err) {
       this.#health.failed('bhyve', err);
@@ -358,8 +358,8 @@ export class Monitor {
   }
 
   /** The open alert conditions (a dry run saves nothing: it would hide alerts from the real service). */
-  #saveAlerts(): void {
-    this.#store.saveAlerts(this.#alerts.state);
+  #saveAlerts(): Promise<void> {
+    return this.#store.saveAlerts(this.#alerts.state);
   }
 
   /** In memory, only what cooldowns and the 24 h cap can still need (the database keeps everything). */
@@ -395,14 +395,16 @@ export class Monitor {
         log.error('Monitoring cycle failed; will retry next poll', err);
         this.#audit.record('poll.failed', { error: errorMessage(err) });
       })
-      .finally(() => {
-        this.#clock.clearTimeout(watchdog);
-        this.#inFlight = undefined;
+      .then(async () => {
         try {
-          this.#deps.heartbeat?.();
+          await this.#deps.heartbeat?.();
         } catch (err) {
           log.error('Could not record the heartbeat', err);
         }
+      })
+      .finally(() => {
+        this.#clock.clearTimeout(watchdog);
+        this.#inFlight = undefined;
         if (this.#running) {
           this.#timer = this.#clock.setTimeout(() => this.#tick(), this.#deps.config.pollIntervalMinutes * MINUTE_MS);
         }

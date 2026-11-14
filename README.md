@@ -42,7 +42,7 @@ and are comfortable editing a JSON file and running a Node.js process on an alwa
 - [Zod](https://zod.dev/) for validating config, environment and API responses
 - [tsx](https://tsx.is/) to run TypeScript directly in development
 - [Vitest](https://vitest.dev/) for tests
-- [Drizzle ORM](https://orm.drizzle.team/) over Node's built-in `node:sqlite` for storage and migrations
+- [Prisma ORM](https://www.prisma.io/) 7 over Node's built-in `node:sqlite` (no native modules) for storage and migrations
 - External services: B-hyve cloud (REST + WebSocket), [Tuya IoT Platform](https://platform.tuya.com)
   OpenAPI, Open-Meteo forecast and geocoding (free, no API key), Telegram Bot API (optional)
 
@@ -148,8 +148,9 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 | `npm run weather:forecast` | Show the forecast and upcoming B-hyve runs the water budget uses |
 | `npm run audit` | Review the audit trail (`audit:summary`, `audit:recovery`; filters such as `-- --since 7d` or `-- --zone <deviceId>:2` are listed at the top of `src/scripts/audit.ts`) |
 | `npm run notify:test` | Send a test Telegram message |
-| `npm run db:migrate` | Create or upgrade the SQLite database (`CONDUCTOR_DB`, or `-- --file <path>`); the service does this itself at startup |
-| `npm run db:generate` / `npm run db:check` | Write a migration to `drizzle/` after changing `src/db/schema.ts` / check the migrations folder |
+| `npm run db:migrate` | Create or upgrade the SQLite database (`CONDUCTOR_DB`, or `-- --file <path>`), converting one of the drizzle-based version; the service does this itself at startup |
+| `npm run db:migration -- <name>` | Write a migration after changing `prisma/schema.prisma` (offline; the same SQL as `prisma migrate dev --create-only`) |
+| `npm run db:generate` / `npm run db:check` | Regenerate the Prisma client / check the migrations produce `prisma/schema.prisma` |
 | `npm run simulate -- --list` | List simulated scenarios (outages, storms, dead batteries, ...); `-- --all` runs them |
 | `npm test` / `npm run test:watch` / `npm run test:coverage` | Run the tests |
 | `npm run typecheck` | Type-check without building |
@@ -159,7 +160,7 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 
 - [docs/disaster-recovery.md](docs/disaster-recovery.md): what happens when a service fails mid-watering, and how to review it
 - [docs/notifications.md](docs/notifications.md): Telegram setup and simulations
-- [docs/sqlite-storage.md](docs/sqlite-storage.md): the SQLite data model (drizzle-orm), migrations and how to change the schema
+- [docs/sqlite-storage.md](docs/sqlite-storage.md): the SQLite data model (Prisma), migrations, the conversion from the drizzle-based version, and how to change the schema
 
 ## TODO
 

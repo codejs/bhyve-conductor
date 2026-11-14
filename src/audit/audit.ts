@@ -43,6 +43,8 @@ export type AuditType =
   | 'state.save_restored'
   /** The JSON state file and JSONL audit trail of an older version were imported into the database. */
   | 'storage.imported'
+  /** A database of the drizzle-based version was converted to the current (Prisma) format. */
+  | 'storage.transferred'
   /** All cycles were sent and the last one's run time has elapsed: the water is off. */
   | 'sequence.finished'
   | 'battery.low'

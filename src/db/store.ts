@@ -1,56 +1,64 @@
-import { and, asc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { StationRun } from '../bhyve/types.ts';
 import type { AlertState } from '../conductor/alerts.ts';
 import type { ZoneConfig } from '../conductor/config.ts';
 import type { WateringRun } from '../conductor/history.ts';
 import type { PendingSequence } from '../conductor/state.ts';
-import type { ConductorStore, SavedZoneSpell, SequenceZone, StoredState, WaveDelivery, ZoneSpell } from '../conductor/store.ts';
+import type { ConductorStore, SavedZoneSpell, SequenceZone, StoredState, ZoneSpell } from '../conductor/store.ts';
 import { log } from '../log.ts';
 import type { MoistureReading } from '../sensors/types.ts';
 import type { ConductorDb } from './database.ts';
+import type { Prisma } from './generated/client.ts';
 import {
-  openAlert,
-  pendingSequence,
-  sensorReading,
-  sequenceWave,
-  sequenceZone,
-  wateringSequence,
-  waveStation,
-  zone,
-  zoneState,
-  zoneWatering,
-  type AlertConditionState,
-} from './schema.ts';
+  ALERT_STATES,
+  alertKindOf,
+  assertOneOf,
+  assertStationRun,
+  assertTime,
+  InvalidDataError,
+  parseZoneKey,
+  WAVE_DELIVERIES,
+  type SequenceResult,
+  type SequenceStatus,
+  type WaveDelivery,
+} from './model.ts';
+
+export { parseZoneKey };
 
 /**
- * The conductor's state in SQLite: the ConductorStore steps (each one transaction), and loading what a
+ * The conductor's state, with Prisma: the ConductorStore steps (each one transaction) and loading what a
  * previous run left behind. See docs/sqlite-storage.md §5 for which step writes what.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export type Tx = Parameters<Parameters<ConductorDb['transaction']>[0]>[0];
+/** A Prisma client or the client of an interactive transaction. */
+type Tx = Prisma.TransactionClient;
 
-/** "<deviceId>:<station>" → its parts (device ids may contain ':'; the station is after the last one). */
-export const parseZoneKey = (key: string): { deviceId: string; station: number } => {
-  const sep = key.lastIndexOf(':');
-  const station = Number(key.slice(sep + 1));
-  if (sep <= 0 || !Number.isInteger(station) || station < 1) throw new Error(`not a zone key: "${key}"`);
-  return { deviceId: key.slice(0, sep), station };
+/** A step that matched nothing is a bug (or a write that was lost): refuse it loudly. */
+export class NoMatchingRowError extends Error {
+  override readonly name = 'NoMatchingRowError';
+  constructor(what: string) {
+    super(`${what}: no matching row`);
+  }
+}
+
+const expectChanged = (result: { count: number }, what: string): void => {
+  if (result.count === 0) throw new NoMatchingRowError(what);
 };
 
 /** Zone rows for keys not registered yet (e.g. a sequence resumed after its zone left the config). */
-export const ensureZoneRows = (tx: Tx, keys: Iterable<string>, at: Date): void => {
+export const ensureZoneRows = async (tx: Tx, keys: Iterable<string>, at: Date): Promise<void> => {
   for (const key of new Set(keys)) {
     const { deviceId, station } = parseZoneKey(key);
-    tx.insert(zone).values({ zoneKey: key, deviceId, station, name: `zone ${station}`, firstSeenAt: at, lastSeenAt: at }).onConflictDoNothing().run();
+    await tx.zone.upsert({
+      where: { zoneKey: key },
+      create: { zoneKey: key, deviceId, station, name: `zone ${station}`, firstSeenAt: at, lastSeenAt: at },
+      update: {},
+    });
   }
 };
 
-/** Throws unless a statement changed exactly what it should have: a step that matched nothing is a bug. */
-const expectChanged = (result: { changes: number | bigint }, what: string): void => {
-  if (Number(result.changes) === 0) throw new Error(`${what}: no matching row`);
-};
+const round1 = (n: number): number => Math.round(n * 10) / 10;
 
 export class SqliteStore implements ConductorStore {
   readonly #db: ConductorDb;
@@ -61,16 +69,21 @@ export class SqliteStore implements ConductorStore {
     this.#serviceRunId = options.serviceRunId;
   }
 
+  get #prisma() {
+    return this.#db.prisma;
+  }
+
   /** Registers the configured zones (upserts names; history outlives zones removed from the config). */
-  syncZones(zones: readonly ZoneConfig[], at: Date): void {
-    this.#db.transaction((tx) => {
-      for (const z of zones) {
-        tx.insert(zone)
-          .values({ zoneKey: z.key, deviceId: z.deviceId, station: z.station, name: z.name, firstSeenAt: at, lastSeenAt: at })
-          .onConflictDoUpdate({ target: zone.zoneKey, set: { name: z.name, lastSeenAt: at } })
-          .run();
-      }
-    });
+  async syncZones(zones: readonly ZoneConfig[], at: Date): Promise<void> {
+    await this.#prisma.$transaction(
+      zones.map((z) =>
+        this.#prisma.zone.upsert({
+          where: { zoneKey: z.key },
+          create: { zoneKey: z.key, deviceId: z.deviceId, station: z.station, name: z.name, firstSeenAt: at, lastSeenAt: at },
+          update: { name: z.name, lastSeenAt: at },
+        }),
+      ),
+    );
   }
 
   // ---------- loading ----------
@@ -81,221 +94,235 @@ export class SqliteStore implements ConductorStore {
    * closed (a crash between the two writes) is completed here, so it can't block its device; with
    * `repair: false` (dry runs write nothing) it is only left out.
    */
-  loadState(now: Date, historyWindowMs: number, options: { repair?: boolean } = {}): StoredState {
+  async loadState(now: Date, historyWindowMs: number, options: { repair?: boolean } = {}): Promise<StoredState> {
     const since = new Date(now.getTime() - Math.max(historyWindowMs, DAY_MS));
-    const history: WateringRun[] = this.#db
-      .select({ zoneKey: zoneWatering.zoneKey, at: zoneWatering.startedAt, minutes: zoneWatering.minutes })
-      .from(zoneWatering)
-      .where(gte(zoneWatering.startedAt, since))
-      .orderBy(asc(zoneWatering.startedAt), asc(zoneWatering.id))
-      .all();
+    const history: WateringRun[] = await this.#prisma.zoneWatering.findMany({
+      where: { startedAt: { gte: since } },
+      orderBy: [{ startedAt: 'asc' }, { id: 'asc' }],
+      select: { zoneKey: true, startedAt: true, minutes: true },
+    }).then((rows) => rows.map((r) => ({ zoneKey: r.zoneKey, at: r.startedAt, minutes: r.minutes })));
 
+    const active = await this.#prisma.wateringSequence.findMany({
+      where: { status: 'active' },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        waves: { orderBy: { waveIndex: 'asc' }, include: { stations: { orderBy: { station: 'asc' } } } },
+        zones: { orderBy: { zoneKey: 'asc' }, select: { zoneName: true } },
+      },
+    });
     const sequences: PendingSequence[] = [];
-    for (const row of this.#db.select().from(pendingSequence).orderBy(asc(pendingSequence.createdAt)).all()) {
-      if (row.nextWave >= row.waveCount) {
+    for (const row of active) {
+      // The wave row is the authority for progress: the first one not yet delivered or skipped is next.
+      const next = row.waves.find((w) => w.status === 'pending' || w.status === 'sending');
+      if (!next) {
         if (options.repair !== false) {
           log.warn(`Watering sequence ${row.id} was fully delivered but never closed; closing it now`);
-          this.#complete(row.id, now);
+          await this.#complete(row.id, now);
         }
         continue;
       }
-      const stations = this.#db
-        .select()
-        .from(waveStation)
-        .where(eq(waveStation.sequenceId, row.id))
-        .orderBy(asc(waveStation.waveIndex), asc(waveStation.station))
-        .all();
-      const waves: StationRun[][] = Array.from({ length: row.waveCount }, () => []);
-      for (const s of stations) waves[s.waveIndex]?.push({ station: s.station, runTime: s.runMinutes });
       sequences.push({
         id: row.id,
         deviceId: row.deviceId,
-        waves,
+        waves: row.waves.map((w) => w.stations.map((s): StationRun => ({ station: s.station, runTime: s.runMinutes }))),
         soakMinutes: row.soakMinutes,
-        ...(row.zoneNames.length > 0 ? { zoneNames: row.zoneNames } : {}),
+        ...(row.zones.length > 0 ? { zoneNames: row.zones.map((z) => z.zoneName) } : {}),
         createdAt: row.createdAt,
-        nextWave: row.nextWave,
+        nextWave: next.waveIndex,
         // Every due wave has a due time; if one is missing, the creation time makes resume() judge it (too) late.
-        dueAt: row.dueAt ?? row.createdAt,
-        attempts: row.attempts,
-        ...(row.inFlightWave !== null && row.inFlightSince ? { inFlight: { wave: row.inFlightWave, since: row.inFlightSince } } : {}),
+        dueAt: next.dueAt ?? row.createdAt,
+        attempts: next.failedAttempts,
+        ...(next.status === 'sending' && next.sentAt ? { inFlight: { wave: next.waveIndex, since: next.sentAt } } : {}),
       });
     }
 
     const alerts: AlertState = {};
-    for (const a of this.#db.select().from(openAlert).orderBy(asc(openAlert.alertKey)).all()) {
+    for (const a of await this.#prisma.openAlert.findMany({ orderBy: { alertKey: 'asc' } })) {
       alerts[a.alertKey] = { state: a.state, since: a.since.toISOString() };
     }
 
-    const zoneSpells: SavedZoneSpell[] = this.#db
-      .select()
-      .from(zoneState)
-      .orderBy(asc(zoneState.zoneKey))
-      .all()
-      .map((z) => ({
-        zoneKey: z.zoneKey,
-        ...(z.drySince ? { drySince: z.drySince } : {}),
-        ...(z.noDataSince ? { noDataSince: z.noDataSince } : {}),
-        evaluatedAt: z.evaluatedAt,
-      }));
+    const zoneSpells: SavedZoneSpell[] = (await this.#prisma.zoneState.findMany({ orderBy: { zoneKey: 'asc' } })).map((z) => ({
+      zoneKey: z.zoneKey,
+      ...(z.drySince ? { drySince: z.drySince } : {}),
+      ...(z.noDataSince ? { noDataSince: z.noDataSince } : {}),
+      evaluatedAt: z.evaluatedAt,
+    }));
 
     return { history, sequences, alerts, zoneSpells };
   }
 
+  /** What each sequence planned and delivered (the simulator and reports). */
+  async sequenceResults(): Promise<SequenceResult[]> {
+    const rows = await this.#prisma.wateringSequence.findMany({
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: { waves: { orderBy: { waveIndex: 'asc' }, include: { stations: true } } },
+    });
+    return rows.map((s) => {
+      const minutes = (w: (typeof s.waves)[number]) => w.stations.reduce((sum, st) => sum + st.runMinutes, 0);
+      const delivered = s.waves.filter((w) => w.status === 'delivered');
+      const offTimes = delivered.filter((w) => w.sentAt).map((w) => (w.sentAt as Date).getTime() + minutes(w) * 60_000);
+      return {
+        id: s.id,
+        deviceId: s.deviceId,
+        createdAt: s.createdAt,
+        status: s.status as SequenceStatus,
+        endedAt: s.endedAt,
+        abandonReason: s.abandonReason,
+        cycles: s.waves.length,
+        cyclesDelivered: delivered.length,
+        plannedMinutes: round1(s.waves.reduce((sum, w) => sum + minutes(w), 0)),
+        deliveredMinutes: round1(delivered.reduce((sum, w) => sum + minutes(w), 0)),
+        uncertainStationRuns: delivered.filter((w) => w.delivery === 'unconfirmed' || w.delivery === 'assumed').reduce((sum, w) => sum + w.stations.length, 0),
+        failedAttempts: s.waves.reduce((sum, w) => sum + w.failedAttempts, 0),
+        waterOffAt: offTimes.length > 0 ? new Date(Math.max(...offTimes)) : null,
+      };
+    });
+  }
+
   // ---------- the Sequencer's steps ----------
 
-  sequenceStarted(seq: PendingSequence, zones: readonly SequenceZone[]): void {
-    this.#db.transaction((tx) => {
-      const stationKeys = seq.waves.flat().map((r) => `${seq.deviceId}:${r.station}`);
-      ensureZoneRows(tx, [...zones.map((z) => z.zoneKey), ...stationKeys], seq.createdAt);
-      tx.insert(wateringSequence)
-        .values({
+  async sequenceStarted(seq: PendingSequence, zones: readonly SequenceZone[]): Promise<void> {
+    assertTime(seq.createdAt, 'the sequence start');
+    assertTime(seq.dueAt, 'the first due time');
+    if (!(seq.soakMinutes >= 0)) throw new InvalidDataError(`the soak must be 0 minutes or more (got ${seq.soakMinutes})`);
+    for (const run of seq.waves.flat()) assertStationRun(run.station, run.runTime);
+    for (const z of zones) if (!(z.requestedMinutes > 0)) throw new InvalidDataError(`${z.zoneKey}: requested minutes must be positive`);
+
+    await this.#prisma.$transaction(async (tx) => {
+      // The Sequencer never runs two sequences on one device; if memory and disk ever disagree, refuse.
+      const running = await tx.wateringSequence.findFirst({ where: { deviceId: seq.deviceId, status: 'active' }, select: { id: true } });
+      if (running) throw new InvalidDataError(`device ${seq.deviceId} already has an active watering sequence (${running.id})`);
+      await ensureZoneRows(tx, [...zones.map((z) => z.zoneKey), ...seq.waves.flat().map((r) => `${seq.deviceId}:${r.station}`)], seq.createdAt);
+      await tx.wateringSequence.create({
+        data: {
           id: seq.id,
           serviceRunId: this.#serviceRunId ?? null,
           deviceId: seq.deviceId,
           soakMinutes: seq.soakMinutes,
           createdAt: seq.createdAt,
-        })
-        .run();
-      for (const z of zones) {
-        tx.insert(sequenceZone)
-          .values({
-            sequenceId: seq.id,
-            zoneKey: z.zoneKey,
-            zoneName: z.zoneName,
-            moisturePct: z.moisturePct ?? null,
-            readingAt: z.readingAt ?? null,
-            thresholdPct: z.thresholdPct,
-            targetPct: z.targetPct,
-            requestedMinutes: z.requestedMinutes,
-            allowanceMinutes: z.allowanceMinutes ?? null,
-            budgetInches: z.budget?.inches ?? null,
-            budget: z.budget ?? null,
-            detail: z.detail,
-          })
-          .run();
-      }
-      seq.waves.forEach((wave, waveIndex) => {
-        tx.insert(sequenceWave)
-          .values({ sequenceId: seq.id, waveIndex, dueAt: waveIndex === seq.nextWave ? seq.dueAt : null })
-          .run();
-        if (wave.length > 0) {
-          tx.insert(waveStation)
-            .values(wave.map((r) => ({ sequenceId: seq.id, waveIndex, station: r.station, runMinutes: r.runTime })))
-            .run();
-        }
+          status: 'active',
+          zones: {
+            create: zones.map((z) => ({
+              zoneKey: z.zoneKey,
+              zoneName: z.zoneName,
+              moisturePct: z.moisturePct ?? null,
+              readingAt: z.readingAt ?? null,
+              thresholdPct: z.thresholdPct,
+              targetPct: z.targetPct,
+              requestedMinutes: z.requestedMinutes,
+              allowanceMinutes: z.allowanceMinutes ?? null,
+              budgetInches: z.budget?.inches ?? null,
+              ...(z.budget ? { budget: z.budget as unknown as Prisma.InputJsonValue } : {}),
+              detail: z.detail,
+            })),
+          },
+          waves: {
+            create: seq.waves.map((wave, waveIndex) => ({
+              waveIndex,
+              dueAt: waveIndex === seq.nextWave ? seq.dueAt : null,
+              stations: { create: wave.map((r) => ({ station: r.station, runMinutes: r.runTime })) },
+            })),
+          },
+        },
       });
     });
   }
 
-  #wave(seq: PendingSequence, index: number) {
-    return and(eq(sequenceWave.sequenceId, seq.id), eq(sequenceWave.waveIndex, index));
-  }
-
-  waveSending(seq: PendingSequence, wave: number, at: Date): void {
-    const result = this.#db
-      .update(sequenceWave)
-      .set({ status: 'sending', sentAt: at })
-      .where(and(this.#wave(seq, wave), eq(sequenceWave.status, 'pending')))
-      .run();
+  async waveSending(seq: PendingSequence, wave: number, at: Date): Promise<void> {
+    assertTime(at, 'the send time');
+    const result = await this.#prisma.sequenceWave.updateMany({
+      where: { sequenceId: seq.id, waveIndex: wave, status: 'pending' },
+      data: { status: 'sending', sentAt: at },
+    });
     expectChanged(result, `marking ${seq.id} cycle ${wave + 1} as sending`);
   }
 
-  waveFailed(seq: PendingSequence, wave: number): void {
-    const result = this.#db
-      .update(sequenceWave)
-      .set({ status: 'pending', sentAt: null, failedAttempts: sql`${sequenceWave.failedAttempts} + 1` })
-      .where(and(this.#wave(seq, wave), inArray(sequenceWave.status, ['pending', 'sending'])))
-      .run();
+  async waveFailed(seq: PendingSequence, wave: number): Promise<void> {
+    const result = await this.#prisma.sequenceWave.updateMany({
+      where: { sequenceId: seq.id, waveIndex: wave, status: { in: ['pending', 'sending'] } },
+      data: { status: 'pending', sentAt: null, failedAttempts: { increment: 1 } },
+    });
     expectChanged(result, `recording a failed attempt at ${seq.id} cycle ${wave + 1}`);
   }
 
-  waveDelivered(seq: PendingSequence, wave: number, delivery: WaveDelivery, sentAt: Date, nextDueAt: Date | undefined): void {
-    this.#db.transaction((tx) => {
+  async waveDelivered(seq: PendingSequence, wave: number, delivery: WaveDelivery, sentAt: Date, nextDueAt: Date | undefined): Promise<void> {
+    assertOneOf(delivery, WAVE_DELIVERIES, 'delivery');
+    assertTime(sentAt, 'the send time');
+    if (nextDueAt) assertTime(nextDueAt, 'the next due time');
+    await this.#prisma.$transaction(async (tx) => {
       // Also from 'pending': if marking it 'sending' failed to save, the delivery must still be recorded.
-      const updated = tx
-        .update(sequenceWave)
-        .set({ status: 'delivered', delivery, sentAt })
-        .where(and(this.#wave(seq, wave), inArray(sequenceWave.status, ['pending', 'sending'])))
-        .run();
+      const updated = await tx.sequenceWave.updateMany({
+        where: { sequenceId: seq.id, waveIndex: wave, status: { in: ['pending', 'sending'] } },
+        data: { status: 'delivered', delivery, sentAt },
+      });
       expectChanged(updated, `recording ${seq.id} cycle ${wave + 1} as delivered`);
-      const stations = tx
-        .select()
-        .from(waveStation)
-        .where(and(eq(waveStation.sequenceId, seq.id), eq(waveStation.waveIndex, wave)))
-        .all();
-      const keys = stations.map((s) => `${seq.deviceId}:${s.station}`);
-      ensureZoneRows(tx, keys, sentAt);
+      const stations = await tx.waveStation.findMany({ where: { sequenceId: seq.id, waveIndex: wave }, orderBy: { station: 'asc' } });
+      await ensureZoneRows(
+        tx,
+        stations.map((s) => `${seq.deviceId}:${s.station}`),
+        sentAt,
+      );
       if (stations.length > 0) {
-        tx.insert(zoneWatering)
-          .values(stations.map((s) => ({ zoneKey: `${seq.deviceId}:${s.station}`, startedAt: sentAt, minutes: s.runMinutes, sequenceId: seq.id, waveIndex: wave })))
-          .run();
+        await tx.zoneWatering.createMany({
+          data: stations.map((s) => ({ zoneKey: `${seq.deviceId}:${s.station}`, startedAt: sentAt, minutes: s.runMinutes, sequenceId: seq.id, waveIndex: wave })),
+        });
       }
       if (nextDueAt) {
-        const next = tx.update(sequenceWave).set({ dueAt: nextDueAt }).where(this.#wave(seq, wave + 1)).run();
+        const next = await tx.sequenceWave.updateMany({ where: { sequenceId: seq.id, waveIndex: wave + 1 }, data: { dueAt: nextDueAt } });
         expectChanged(next, `scheduling ${seq.id} cycle ${wave + 2}`);
       }
     });
   }
 
-  sequenceCompleted(seq: PendingSequence, at: Date): void {
-    this.#complete(seq.id, at);
+  async sequenceCompleted(seq: PendingSequence, at: Date): Promise<void> {
+    await this.#complete(seq.id, at);
   }
 
-  #complete(id: string, at: Date): void {
-    const result = this.#db
-      .update(wateringSequence)
-      .set({ status: 'completed', endedAt: at })
-      .where(and(eq(wateringSequence.id, id), eq(wateringSequence.status, 'active')))
-      .run();
+  async #complete(id: string, at: Date): Promise<void> {
+    assertTime(at, 'the end time');
+    const result = await this.#prisma.wateringSequence.updateMany({ where: { id, status: 'active' }, data: { status: 'completed', endedAt: at } });
     expectChanged(result, `completing ${id}`);
   }
 
-  sequenceAbandoned(seq: PendingSequence, at: Date, reason: string): void {
-    this.#db.transaction((tx) => {
-      const result = tx
-        .update(wateringSequence)
-        .set({ status: 'abandoned', endedAt: at, abandonReason: reason })
-        .where(and(eq(wateringSequence.id, seq.id), eq(wateringSequence.status, 'active')))
-        .run();
+  async sequenceAbandoned(seq: PendingSequence, at: Date, reason: string): Promise<void> {
+    assertTime(at, 'the end time');
+    await this.#prisma.$transaction(async (tx) => {
+      const result = await tx.wateringSequence.updateMany({ where: { id: seq.id, status: 'active' }, data: { status: 'abandoned', endedAt: at, abandonReason: reason } });
       expectChanged(result, `abandoning ${seq.id}`);
-      tx.update(sequenceWave)
-        .set({ status: 'skipped' })
-        .where(and(eq(sequenceWave.sequenceId, seq.id), eq(sequenceWave.status, 'pending')))
-        .run();
+      await tx.sequenceWave.updateMany({ where: { sequenceId: seq.id, status: 'pending' }, data: { status: 'skipped' } });
     });
   }
 
   // ---------- the Monitor's ----------
 
-  saveAlerts(alerts: AlertState): void {
-    this.#db.transaction((tx) => {
-      tx.delete(openAlert).run();
-      const rows = Object.entries(alerts).map(([alertKey, v]) => ({ alertKey, state: v.state as AlertConditionState, since: new Date(v.since) }));
-      if (rows.length > 0) tx.insert(openAlert).values(rows).run();
+  /** Replaces the open alert conditions, all or nothing. */
+  async saveAlerts(alerts: AlertState): Promise<void> {
+    const rows = Object.entries(alerts).map(([alertKey, v]) => {
+      const since = new Date(v.since);
+      assertTime(since, `the start of alert ${alertKey}`);
+      return { alertKey, kind: alertKindOf(alertKey), state: assertOneOf(v.state, ALERT_STATES, `the state of alert ${alertKey}`), since };
     });
+    await this.#prisma.$transaction([this.#prisma.openAlert.deleteMany(), ...(rows.length > 0 ? [this.#prisma.openAlert.createMany({ data: rows })] : [])]);
   }
 
-  saveZoneSpells(spells: readonly ZoneSpell[], at: Date): void {
+  async saveZoneSpells(spells: readonly ZoneSpell[], at: Date): Promise<void> {
     if (spells.length === 0) return;
-    this.#db.transaction((tx) => {
-      ensureZoneRows(
+    assertTime(at, 'the poll time');
+    await this.#prisma.$transaction(async (tx) => {
+      await ensureZoneRows(
         tx,
         spells.map((s) => s.zoneKey),
         at,
       );
       for (const s of spells) {
         const values = { drySince: s.drySince ?? null, noDataSince: s.noDataSince ?? null, evaluatedAt: at };
-        tx.insert(zoneState)
-          .values({ zoneKey: s.zoneKey, ...values })
-          .onConflictDoUpdate({ target: zoneState.zoneKey, set: values })
-          .run();
+        await tx.zoneState.upsert({ where: { zoneKey: s.zoneKey }, create: { zoneKey: s.zoneKey, ...values }, update: values });
       }
     });
   }
 
   /** Each reading once: Tuya returns the same reading until the sensor reports again. */
-  recordReadings(readings: readonly MoistureReading[], polledAt: Date): void {
+  async recordReadings(readings: readonly MoistureReading[], polledAt: Date): Promise<void> {
     const rows = readings
       .filter((r) => Number.isFinite(r.at.getTime()))
       .map((r) => ({
@@ -308,8 +335,10 @@ export class SqliteStore implements ConductorStore {
         online: r.online,
       }));
     if (rows.length === 0) return;
-    this.#db.transaction((tx) => {
-      for (const row of rows) tx.insert(sensorReading).values(row).onConflictDoNothing().run();
-    });
+    await this.#prisma.$transaction(
+      rows.map((row) =>
+        this.#prisma.sensorReading.upsert({ where: { sensorId_measuredAt: { sensorId: row.sensorId, measuredAt: row.measuredAt } }, create: row, update: {} }),
+      ),
+    );
   }
 }

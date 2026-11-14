@@ -1,0 +1,225 @@
+// Storage model of the conductor (SQLite, Prisma ORM). Design and reasons: docs/sqlite-storage.md.
+//
+// Conventions
+//  - Table and column names are snake_case in the database (@@map / @map) and camelCase in TypeScript.
+//  - DateTime values are stored as Date#toISOString() text ("2026-07-01T11:00:00.000Z") by the app's
+//    node:sqlite driver adapter (src/db/adapter.ts): fixed width, so text order is time order. They always
+//    come from the app's Clock, never from the database (no now() defaults): simulations run in virtual time.
+//  - Durations are Float minutes (cycles can be 2.5 min). Zone key = "<deviceId>:<station>".
+//  - Values SQLite can't be told to check without raw SQL (status names, ranges, "one active sequence per
+//    device") are checked by the store before it writes (src/db/model.ts, src/db/store.ts).
+//
+// After editing: `npm run db:migration -- <name>` writes the migration, `npm run db:generate` the client.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/db/generated"
+  runtime  = "nodejs"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// One row per process start. A run that never recorded its stop crashed (see service-run.ts).
+model ServiceRun {
+  id          Int       @id @default(autoincrement())
+  startedAt   DateTime  @map("started_at")
+  /// 'continuous' | 'once'
+  mode        String
+  dryRun      Boolean   @map("dry_run")
+  pid         Int?
+  configHash  String    @map("config_hash")
+  /// The effective (defaults-applied) ConductorConfig.
+  config      Json      @map("config_json")
+  /// Updated after every poll: the best estimate of when a crashed run died.
+  heartbeatAt DateTime  @map("heartbeat_at")
+  stoppedAt   DateTime? @map("stopped_at")
+  /// 'SIGTERM' | 'SIGINT' | 'once' ... for clean stops; 'unclean' when a later run found it never stopped.
+  stopReason  String?   @map("stop_reason")
+
+  sequences WateringSequence[]
+
+  @@map("service_run")
+}
+
+/// Zone registry: upserted from conductor.json at every start, never deleted (history outlives config).
+model Zone {
+  zoneKey     String   @id @map("zone_key")
+  deviceId    String   @map("device_id")
+  station     Int
+  name        String
+  firstSeenAt DateTime @map("first_seen_at")
+  lastSeenAt  DateTime @map("last_seen_at")
+
+  sequenceZones SequenceZone[]
+  watering      ZoneWatering[]
+  state         ZoneState?
+
+  @@unique([deviceId, station], map: "zone_device_station")
+  @@map("zone")
+}
+
+/// The conductor's watering schedule and its results (PendingSequence, kept after it finishes).
+model WateringSequence {
+  /// Full randomUUID(); messages show the first 8 characters. Imported rows may have 8-character ids.
+  id            String    @id
+  serviceRunId  Int?      @map("service_run_id")
+  deviceId      String    @map("device_id")
+  soakMinutes   Float     @map("soak_minutes")
+  createdAt     DateTime  @map("created_at")
+  /// 'active' | 'completed' | 'abandoned'. At most one 'active' per device (checked by the store).
+  status        String    @default("active")
+  endedAt       DateTime? @map("ended_at")
+  abandonReason String?   @map("abandon_reason")
+
+  serviceRun ServiceRun?    @relation(fields: [serviceRunId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  zones      SequenceZone[]
+  waves      SequenceWave[]
+
+  @@index([createdAt], map: "watering_sequence_created")
+  @@index([deviceId, createdAt], map: "watering_sequence_device_created")
+  @@index([deviceId, status], map: "watering_sequence_device_status")
+  @@map("watering_sequence")
+}
+
+/// Why a zone is part of a sequence: the ZoneDecision that led to it (a snapshot).
+model SequenceZone {
+  sequenceId       String    @map("sequence_id")
+  zoneKey          String    @map("zone_key")
+  zoneName         String    @map("zone_name")
+  moisturePct      Float?    @map("moisture_pct")
+  readingAt        DateTime? @map("reading_at")
+  thresholdPct     Float     @map("threshold_pct")
+  targetPct        Float     @map("target_pct")
+  requestedMinutes Float     @map("requested_minutes")
+  allowanceMinutes Float?    @map("allowance_minutes")
+  budgetInches     Float?    @map("budget_inches")
+  /// The full WaterBudget, when the forecast was used.
+  budget           Json?     @map("budget_json")
+  detail           String
+
+  sequence WateringSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  zone     Zone             @relation(fields: [zoneKey], references: [zoneKey], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([sequenceId, zoneKey])
+  @@index([zoneKey], map: "sequence_zone_zone")
+  @@map("sequence_zone")
+}
+
+/// One row per wave (cycle). Authority for the sequence's progress (see SqliteStore.loadState).
+model SequenceWave {
+  sequenceId     String    @map("sequence_id")
+  /// 0-based; messages say "cycle waveIndex + 1".
+  waveIndex      Int       @map("wave_index")
+  /// 'pending' | 'sending' | 'delivered' | 'skipped'
+  status         String    @default("pending")
+  dueAt          DateTime? @map("due_at")
+  sentAt         DateTime? @map("sent_at")
+  /// 'event' | 'status' | 'unconfirmed' | 'assumed' (set when delivered)
+  delivery       String?
+  failedAttempts Int       @default(0) @map("failed_attempts")
+
+  sequence WateringSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  stations WaveStation[]
+  watering ZoneWatering[]
+
+  @@id([sequenceId, waveIndex])
+  @@map("sequence_wave")
+}
+
+/// Stations in a wave, run back to back in station order.
+model WaveStation {
+  sequenceId String @map("sequence_id")
+  waveIndex  Int    @map("wave_index")
+  station    Int
+  runMinutes Float  @map("run_minutes")
+
+  wave SequenceWave @relation(fields: [sequenceId, waveIndex], references: [sequenceId, waveIndex], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([sequenceId, waveIndex, station])
+  @@map("wave_station")
+}
+
+/// The watering ledger (cooldowns, the 24 h cap). Only ever inserted; deleting an old sequence keeps its
+/// rows and sets their provenance to NULL.
+model ZoneWatering {
+  id         Int      @id @default(autoincrement())
+  zoneKey    String   @map("zone_key")
+  startedAt  DateTime @map("started_at")
+  minutes    Float
+  /// NULL for runs imported from the old state file, or whose sequence was purged.
+  sequenceId String?  @map("sequence_id")
+  waveIndex  Int?     @map("wave_index")
+
+  zone Zone          @relation(fields: [zoneKey], references: [zoneKey], onDelete: NoAction, onUpdate: NoAction)
+  wave SequenceWave? @relation(fields: [sequenceId, waveIndex], references: [sequenceId, waveIndex], onDelete: SetNull, onUpdate: NoAction)
+
+  @@unique([sequenceId, waveIndex, zoneKey], map: "zone_watering_once_per_wave")
+  @@index([zoneKey, startedAt], map: "zone_watering_zone_time")
+  @@map("zone_watering")
+}
+
+/// Open alert conditions (AlertTracker.state). Closed ones are only in the audit trail.
+model OpenAlert {
+  /// "battery:sensor:<id>", "battery:device:<id>", "moisture:<zoneKey>:<sensorId>", "device:<id>", "daily-limit:<zoneKey>"
+  alertKey String   @id @map("alert_key")
+  /// The key's prefix: 'battery' | 'moisture' | 'device' | 'daily-limit'
+  kind     String
+  /// 'low' | 'high' | 'offline' | 'reached'
+  state    String
+  since    DateTime
+
+  @@map("open_alert")
+}
+
+/// Per-zone dry spell and sensor blackout (Monitor #drySince / #noDataSince).
+model ZoneState {
+  zoneKey     String    @id @map("zone_key")
+  drySince    DateTime? @map("dry_since")
+  noDataSince DateTime? @map("no_data_since")
+  evaluatedAt DateTime  @map("evaluated_at")
+
+  zone Zone @relation(fields: [zoneKey], references: [zoneKey], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("zone_state")
+}
+
+/// The audit trail. Only ever inserted (old rows may be deleted for retention). Deliberately no
+/// relations: auditing must never be refused.
+model AuditEvent {
+  id           Int      @id @default(autoincrement())
+  ts           DateTime
+  /// AuditType ('wave.sent', ...)
+  type         String
+  serviceRunId Int?     @map("service_run_id")
+  /// The event minus ts/type, exactly what AuditSink.record() received.
+  data         Json
+  /// Copied from data.device / data.zone / data.sequence when recorded, for the indexed filters.
+  deviceId     String?  @map("device_id")
+  zoneKey      String?  @map("zone_key")
+  sequenceId   String?  @map("sequence_id")
+
+  @@index([ts], map: "audit_event_ts")
+  @@index([type, ts], map: "audit_event_type_ts")
+  @@index([deviceId, ts], map: "audit_event_device")
+  @@index([zoneKey, ts], map: "audit_event_zone")
+  @@index([sequenceId, ts], map: "audit_event_sequence")
+  @@map("audit_event")
+}
+
+/// Sensor readings, each once (Tuya repeats a reading until the sensor reports again).
+model SensorReading {
+  sensorId     String   @map("sensor_id")
+  measuredAt   DateTime @map("measured_at")
+  /// The first poll that saw it.
+  polledAt     DateTime @map("polled_at")
+  /// Raw, not range-checked: bad values are evidence of a bad sensor.
+  moisturePct  Float?   @map("moisture_pct")
+  temperatureC Float?   @map("temperature_c")
+  batteryPct   Float?   @map("battery_pct")
+  online       Boolean
+
+  @@id([sensorId, measuredAt])
+  @@map("sensor_reading")
+}

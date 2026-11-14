@@ -45,6 +45,7 @@ sent, and the soak gaps between cycles.
 | 15 | **Audit events can't be written** (same causes) | Logged as errors; watering is unaffected. Telegram still gets its messages. | (service log only) | As #14. |
 | 16 | **Telegram unreachable** | Notifications are retried (5 s → 10 min), then dropped; watering is never affected. | `notification.failed` | Check the bot token/chat (`npm run notify:test`). |
 | 17 | **Schema upgrade fails** after installing a new version | The database is copied to `<file>.before-<migration>` first; the failed upgrade rolls back completely and the conductor refuses to start, saying why. | (service log) | Fix or roll back the release. The copy is only needed if something else went wrong. |
+| 18 | **Upgrading from the drizzle-based version** | The first start converts the database into a new file (every row copied and compared) and keeps the original as `<file>.drizzle-backup`. A crash during the conversion is finished or undone at the next start. If the old version is still running, nothing is converted and the start fails. | `storage.transferred` | Stop the old version before starting the new one. |
 
 ## Being told, and rehearsing
 

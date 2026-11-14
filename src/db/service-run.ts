@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { asc, eq, isNull } from 'drizzle-orm';
 import { lastAuditEventOf } from './audit-log.ts';
 import type { ConductorDb } from './database.ts';
-import { serviceRun, type RunMode } from './schema.ts';
+import type { Prisma } from './generated/client.ts';
+import type { RunMode } from './model.ts';
 
 /**
  * One `service_run` row per process start. A run that never recorded its stop crashed, was killed or lost
@@ -29,45 +29,43 @@ export interface BeginRunOptions {
 export const configHash = (config: unknown): string => createHash('sha256').update(JSON.stringify(config)).digest('hex');
 
 /** Records the start of a run; a real run also closes (and reports) runs that never stopped. */
-export const beginServiceRun = (db: ConductorDb, o: BeginRunOptions): { runId: number; unclean?: UncleanShutdown } => {
-  const unstopped = o.dryRun ? [] : db.select().from(serviceRun).where(isNull(serviceRun.stoppedAt)).orderBy(asc(serviceRun.id)).all();
+export const beginServiceRun = async (db: ConductorDb, o: BeginRunOptions): Promise<{ runId: number; unclean?: UncleanShutdown }> => {
+  const { prisma } = db;
+  const unstopped = o.dryRun ? [] : await prisma.serviceRun.findMany({ where: { stoppedAt: null }, orderBy: { id: 'asc' } });
   const crashed = unstopped.filter((r) => !r.dryRun).at(-1);
   let unclean: UncleanShutdown | undefined;
   if (crashed) {
     // Simulation notes describe the outside world, not what the conductor did last.
-    const last = lastAuditEventOf(db, { serviceRunId: crashed.id, excludeTypes: ['simulation.note'] });
+    const last = await lastAuditEventOf(db, { serviceRunId: crashed.id, excludeTypes: ['simulation.note'] });
     unclean = { runId: crashed.id, lastEvent: last?.type ?? 'service.started', lastEventAt: last?.ts ?? crashed.heartbeatAt.toISOString() };
   }
 
-  const runId = db.transaction((tx) => {
-    for (const r of unstopped) {
-      tx.update(serviceRun).set({ stoppedAt: r.heartbeatAt, stopReason: 'unclean' }).where(eq(serviceRun.id, r.id)).run();
-    }
-    const row = tx
-      .insert(serviceRun)
-      .values({
+  const [created] = await prisma.$transaction([
+    prisma.serviceRun.create({
+      data: {
         startedAt: o.startedAt,
         mode: o.mode,
         dryRun: o.dryRun,
         pid: o.pid ?? null,
         configHash: configHash(o.config),
-        config: o.config,
+        config: JSON.parse(JSON.stringify(o.config)) as Prisma.InputJsonValue,
         heartbeatAt: o.startedAt,
-      })
-      .returning({ id: serviceRun.id })
-      .get();
-    if (!row) throw new Error('could not record the service run');
-    return row.id;
-  });
-  return unclean ? { runId, unclean } : { runId };
+      },
+      select: { id: true },
+    }),
+    // Each died after its last heartbeat.
+    ...unstopped.map((r) => prisma.serviceRun.update({ where: { id: r.id }, data: { stoppedAt: r.heartbeatAt, stopReason: 'unclean' }, select: { id: true } })),
+  ]);
+  if (!created) throw new Error('could not record the service run');
+  return unclean ? { runId: created.id, unclean } : { runId: created.id };
 };
 
 /** The run is alive (after every poll); a crashed run is assumed to have died after its last heartbeat. */
-export const recordHeartbeat = (db: ConductorDb, runId: number, at: Date): void => {
-  db.update(serviceRun).set({ heartbeatAt: at }).where(eq(serviceRun.id, runId)).run();
+export const recordHeartbeat = async (db: ConductorDb, runId: number, at: Date): Promise<void> => {
+  await db.prisma.serviceRun.update({ where: { id: runId }, data: { heartbeatAt: at }, select: { id: true } });
 };
 
 /** A clean stop ('SIGTERM', 'SIGINT', 'once', ...). */
-export const endServiceRun = (db: ConductorDb, runId: number, at: Date, reason: string): void => {
-  db.update(serviceRun).set({ heartbeatAt: at, stoppedAt: at, stopReason: reason }).where(eq(serviceRun.id, runId)).run();
+export const endServiceRun = async (db: ConductorDb, runId: number, at: Date, reason: string): Promise<void> => {
+  await db.prisma.serviceRun.update({ where: { id: runId }, data: { heartbeatAt: at, stoppedAt: at, stopReason: reason }, select: { id: true } });
 };

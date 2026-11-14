@@ -56,13 +56,14 @@ const main = async (): Promise<void> => {
   const config = await loadConductorConfig(env.CONDUCTOR_CONFIG);
   if (args['dry-run']) config.dryRun = true;
 
-  // Creates or upgrades the database (backing it up first), and on the first run imports the files an
-  // earlier version kept. A dry run leaves them alone: it must not change what the real service sees.
+  // Creates or upgrades the database (backing it up first; a database of the drizzle-based version is
+  // converted once), and on the first run imports the files an earlier version kept. A dry run leaves those
+  // alone: it must not change what the real service sees.
   const db = openDatabase(env.CONDUCTOR_DB);
   const legacy = config.dryRun
     ? undefined
     : await importLegacyFiles(db, { statePath: env.CONDUCTOR_STATE, auditPath: env.CONDUCTOR_AUDIT }, config.zones, new Date());
-  const session = beginSession(db, {
+  const session = await beginSession(db, {
     config,
     mode: args.once ? 'once' : 'continuous',
     now: () => new Date(),
@@ -91,6 +92,10 @@ const main = async (): Promise<void> => {
       audit = teeAudit(auditDb, notifier);
       log.info(`Telegram notifications on (${config.notifications.minSeverity} and above)`);
     }
+  }
+  if (db.transferred) {
+    const { backupPath, rows, drizzleMigrations } = db.transferred;
+    audit.record('storage.transferred', { from: 'drizzle', backup: backupPath, rows, drizzleMigrations });
   }
   if (legacy) {
     audit.record('storage.imported', {
@@ -151,12 +156,13 @@ const main = async (): Promise<void> => {
     await monitor.stop();
     bhyve.close();
     audit.record('service.stopped', { reason });
-    session.end(reason);
+    await session.end(reason);
     notifier?.stop();
     // Give queued notifications a moment, but never let Telegram hold up a shutdown.
     if (queue) await Promise.race([queue.flush(), new Promise((r) => setTimeout(r, 10_000))]);
     queue?.stop(); // drops are audited, so the database closes after this
-    db.$client.close();
+    await auditDb.flush();
+    await db.close();
   };
 
   let stopping = false;

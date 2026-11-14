@@ -2,14 +2,12 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { asc } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConductorConfig } from '../../conductor/config.ts';
 import { WateringHistory } from '../../conductor/history.ts';
 import { queryAuditEvents } from '../../db/audit-log.ts';
 import { openDatabase, type ConductorDb } from '../../db/database.ts';
 import { importLegacyFiles, type LegacyFiles } from '../../db/legacy-import.ts';
-import { sequenceWave, sequenceZone, zoneWatering } from '../../db/schema.ts';
 import { beginSession } from '../../db/session.ts';
 import { SqliteStore } from '../../db/store.ts';
 import { log } from '../../log.ts';
@@ -76,7 +74,7 @@ describe('importLegacyFiles', () => {
   });
 
   afterEach(async () => {
-    db.$client.close();
+    await db.close();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -100,7 +98,7 @@ describe('importLegacyFiles', () => {
       renamed: [`${files.statePath}.imported`, `${files.auditPath}.imported`],
     });
     expect((await readdir(dir)).sort()).toEqual(['.conductor-audit.jsonl.imported', '.conductor-state.json.imported', 'conductor.db', 'conductor.db-shm', 'conductor.db-wal']);
-    expect(queryAuditEvents(db)).toEqual(auditLines);
+    expect(await queryAuditEvents(db)).toEqual(auditLines);
     expect(JSON.parse(await readFile(`${files.statePath}.imported`, 'utf8'))).toEqual(stateFile); // kept as it was
   });
 
@@ -108,7 +106,7 @@ describe('importLegacyFiles', () => {
     await writeLegacy();
     await importLegacyFiles(db, files, zones, NOW);
 
-    const state = new SqliteStore(db).loadState(NOW, 0);
+    const state = await new SqliteStore(db).loadState(NOW, 0);
 
     expect(state.sequences).toEqual([
       {
@@ -132,26 +130,26 @@ describe('importLegacyFiles', () => {
     const before = new WateringHistory(stateFile.runs.slice(0, 2).map((r) => ({ ...r, at: new Date(r.at) })));
     await importLegacyFiles(db, files, zones, NOW);
 
-    const after = new WateringHistory(new SqliteStore(db).loadState(NOW, 0).history);
+    const after = new WateringHistory((await new SqliteStore(db).loadState(NOW, 0)).history);
 
     for (const key of ['dev1:1', 'dev1:2']) {
       expect(after.minutesInLastDay(key, NOW)).toBe(before.minutesInLastDay(key, NOW));
       expect(after.lastRun(key)).toEqual(before.lastRun(key));
     }
     // The delivered first cycle is marked delivered (its time estimated), without a second ledger row.
-    expect(db.select({ status: sequenceWave.status, delivery: sequenceWave.delivery, sentAt: sequenceWave.sentAt }).from(sequenceWave).orderBy(asc(sequenceWave.waveIndex)).all()).toEqual([
+    expect(await db.prisma.sequenceWave.findMany({ orderBy: { waveIndex: 'asc' }, select: { status: true, delivery: true, sentAt: true } })).toEqual([
       { status: 'delivered', delivery: 'assumed', sentAt: ago(90) },
       { status: 'sending', delivery: null, sentAt: ago(60) },
       { status: 'pending', delivery: null, sentAt: null },
     ]);
-    expect(db.select().from(zoneWatering).all()).toHaveLength(2);
+    expect(await db.prisma.zoneWatering.count()).toBe(2);
   });
 
   it('explains each imported sequence with the configured zones', async () => {
     await writeLegacy();
     await importLegacyFiles(db, files, zones, NOW);
 
-    expect(db.select().from(sequenceZone).all()).toEqual([
+    expect(await db.prisma.sequenceZone.findMany()).toEqual([
       expect.objectContaining({ sequenceId: '3d7cc742', zoneKey: 'dev1:1', zoneName: 'Front', thresholdPct: 30, targetPct: 40, requestedMinutes: 24, detail: `imported from ${files.statePath}` }),
     ]);
   });
@@ -160,7 +158,7 @@ describe('importLegacyFiles', () => {
     await writeLegacy();
     const result = await importLegacyFiles(db, files, zones, NOW);
 
-    const session = beginSession(db, {
+    const session = await beginSession(db, {
       config,
       mode: 'continuous',
       now: () => NOW,
@@ -177,13 +175,13 @@ describe('importLegacyFiles', () => {
     const other = openDatabase(':memory:');
     await writeFile(files.statePath, JSON.stringify({ runs: stateFile.runs.slice(0, 1) }));
     expect(await importLegacyFiles(other, files, zones, NOW)).toMatchObject({ runs: 1, auditEvents: 0, renamed: [`${files.statePath}.imported`] });
-    other.$client.close();
+    await other.close();
   });
 
   it('does nothing without files, or for a database already in use (the files stay where they are)', async () => {
     expect(await importLegacyFiles(db, files, zones, NOW)).toBeUndefined();
 
-    beginSession(db, { config, mode: 'continuous', now: () => NOW });
+    await beginSession(db, { config, mode: 'continuous', now: () => NOW });
     await writeLegacy();
 
     expect(await importLegacyFiles(db, files, zones, NOW)).toBeUndefined();

@@ -7,11 +7,9 @@ import { WateringHistory } from '../../conductor/history.ts';
 import type { DeviceCommand } from '../../conductor/plan.ts';
 import { Sequencer } from '../../conductor/sequencer.ts';
 import type { PendingSequence } from '../../conductor/state.ts';
-import { asc, eq } from 'drizzle-orm';
 import type { ZoneDecision } from '../../conductor/plan.ts';
 import { guardStore } from '../../conductor/store.ts';
 import { openDatabase } from '../../db/database.ts';
-import { sequenceResult, sequenceWave, sequenceZone, wateringSequence, zoneWatering } from '../../db/schema.ts';
 import { SqliteStore } from '../../db/store.ts';
 import { log } from '../../log.ts';
 import { bhyveDevice, NOW, zone } from '../utils/conductor.ts';
@@ -34,18 +32,18 @@ const setup = (options: Partial<RecoveryOptions> = {}) => {
   const db = openDatabase(':memory:');
   const store = new SqliteStore(db);
   /** What a crash right now would leave on disk: the unfinished sequences as the next start loads them. */
-  const saved = (): PendingSequence[] => store.loadState(new Date(), 0, { repair: false }).sequences;
+  const saved = async (): Promise<PendingSequence[]> => (await store.loadState(new Date(), 0, { repair: false })).sequences;
   /** Puts a sequence on disk as a previous run would have left it, and returns it as loaded at the next start. */
-  const leftBehind = (seq: PendingSequence): PendingSequence => {
+  const leftBehind = async (seq: PendingSequence): Promise<PendingSequence> => {
     const started = { ...seq, nextWave: 0, dueAt: seq.nextWave === 0 ? seq.dueAt : seq.createdAt };
-    store.sequenceStarted(started, []);
+    await store.sequenceStarted(started, []);
     for (let i = 0; i < seq.nextWave; i++) {
-      store.waveSending(started, i, seq.createdAt);
-      store.waveDelivered(started, i, 'event', seq.createdAt, i + 1 === seq.nextWave ? seq.dueAt : seq.createdAt);
+      await store.waveSending(started, i, seq.createdAt);
+      await store.waveDelivered(started, i, 'event', seq.createdAt, i + 1 === seq.nextWave ? seq.dueAt : seq.createdAt);
     }
-    for (let i = 0; i < seq.attempts; i++) store.waveFailed(started, seq.nextWave);
-    if (seq.inFlight) store.waveSending(started, seq.inFlight.wave, seq.inFlight.since);
-    const loaded = saved().find((p) => p.id === seq.id);
+    for (let i = 0; i < seq.attempts; i++) await store.waveFailed(started, seq.nextWave);
+    if (seq.inFlight) await store.waveSending(started, seq.inFlight.wave, seq.inFlight.since);
+    const loaded = (await saved()).find((p) => p.id === seq.id);
     if (!loaded) throw new Error(`${seq.id} was not saved`);
     return loaded;
   };
@@ -133,7 +131,7 @@ describe('Sequencer', () => {
       const t = setup();
       let savedAtSend: PendingSequence[] | undefined;
       t.bhyve.startWatering.mockImplementationOnce(async (deviceId: string) => {
-        savedAtSend = t.saved();
+        savedAtSend = await t.saved();
         t.fake.emit({ event: 'watering_in_progress_notification', device_id: deviceId });
       });
 
@@ -142,8 +140,8 @@ describe('Sequencer', () => {
       // A crash during the send would leave this on disk:
       expect(savedAtSend).toEqual([expect.objectContaining({ nextWave: 0, inFlight: { wave: 0, since: NOW } })]);
       // ...and after the outcome is saved, the marker is gone and the next wave is due:
-      expect(t.saved()).toEqual([expect.objectContaining({ nextWave: 1, dueAt: new Date(NOW.getTime() + 40 * MIN) })]);
-      expect(t.saved()[0]).not.toHaveProperty('inFlight');
+      expect(await t.saved()).toEqual([expect.objectContaining({ nextWave: 1, dueAt: new Date(NOW.getTime() + 40 * MIN) })]);
+      expect((await t.saved())[0]).not.toHaveProperty('inFlight');
     });
 
     it('accepts an acknowledgement that arrives within the confirm timeout', async () => {
@@ -313,7 +311,7 @@ describe('Sequencer', () => {
         reason: expect.stringContaining('gave up on cycle 1/2 after 7 attempt(s) over 30 min: socket down'),
       });
       expect(t.sequencer.isActive('dev1')).toBe(false);
-      expect(t.saved()).toEqual([]); // nothing left to resume
+      expect(await t.saved()).toEqual([]); // nothing left to resume
       expect(t.history.runs).toEqual([]);
     });
 
@@ -342,7 +340,7 @@ describe('Sequencer', () => {
 
       expect(t.bhyve.startWatering).toHaveBeenCalledTimes(1);
       expect(t.audit.ofType('sequence.abandoned')[0]).toMatchObject({ reason, cyclesDelivered: 1 });
-      expect(t.saved()).toEqual([]);
+      expect(await t.saved()).toEqual([]);
     });
 
     it.each([
@@ -393,7 +391,7 @@ describe('Sequencer', () => {
     it('resumes at the saved cycle when it comes due', async () => {
       const t = setup();
 
-      await t.sequencer.resume([t.leftBehind(saved())]);
+      await t.sequencer.resume([await t.leftBehind(saved())]);
       expect(t.audit.ofType('sequence.resumed')[0]).toMatchObject({ sequence: 'abc', nextCycle: 2, of: 3 });
       expect(t.sequencer.isActive('dev1')).toBe(true);
 
@@ -407,7 +405,7 @@ describe('Sequencer', () => {
     it('sends an overdue cycle right away if still within the resume window', async () => {
       const t = setup({ resumeWindowMinutes: 60 });
 
-      await t.sequencer.resume([t.leftBehind(saved({ dueAt: new Date(NOW.getTime() - 20 * MIN) }))]);
+      await t.sequencer.resume([await t.leftBehind(saved({ dueAt: new Date(NOW.getTime() - 20 * MIN) }))]);
       await vi.advanceTimersByTimeAsync(0);
 
       expect(t.bhyve.startWatering).toHaveBeenCalledTimes(1);
@@ -416,19 +414,19 @@ describe('Sequencer', () => {
     it('abandons a sequence that is too stale to resume', async () => {
       const t = setup({ resumeWindowMinutes: 60 });
 
-      await t.sequencer.resume([t.leftBehind(saved({ dueAt: new Date(NOW.getTime() - 90 * MIN) }))]);
+      await t.sequencer.resume([await t.leftBehind(saved({ dueAt: new Date(NOW.getTime() - 90 * MIN) }))]);
       await vi.advanceTimersByTimeAsync(60 * MIN);
 
       expect(t.bhyve.startWatering).not.toHaveBeenCalled();
       expect(t.audit.ofType('sequence.abandoned')[0]?.reason).toBe('too late to resume after a restart: cycle 2 was due 90 min ago');
-      expect(t.saved()).toEqual([]);
+      expect(await t.saved()).toEqual([]);
     });
 
     it('counts a wave found in flight as delivered and moves on (never sends it twice)', async () => {
       const t = setup();
       const sentAt = new Date(NOW.getTime() - 2 * MIN);
 
-      await t.sequencer.resume([t.leftBehind(saved({ inFlight: { wave: 1, since: sentAt }, dueAt: new Date(NOW.getTime() - 2 * MIN) }))]);
+      await t.sequencer.resume([await t.leftBehind(saved({ inFlight: { wave: 1, since: sentAt }, dueAt: new Date(NOW.getTime() - 2 * MIN) }))]);
 
       expect(t.audit.ofType('wave.assumed_delivered')[0]).toMatchObject({ cycle: 2, reason: 'found in flight after a restart' });
       expect(t.history.runs).toEqual([{ zoneKey: 'dev1:1', at: sentAt, minutes: 10 }]);
@@ -443,11 +441,11 @@ describe('Sequencer', () => {
     it('completes a sequence whose last wave was in flight', async () => {
       const t = setup();
 
-      await t.sequencer.resume([t.leftBehind(saved({ nextWave: 2, inFlight: { wave: 2, since: NOW } }))]);
+      await t.sequencer.resume([await t.leftBehind(saved({ nextWave: 2, inFlight: { wave: 2, since: NOW } }))]);
 
       expect(t.types()).toEqual(['wave.assumed_delivered', 'sequence.completed']);
       expect(t.sequencer.isActive('dev1')).toBe(false);
-      expect(t.saved()).toEqual([]);
+      expect(await t.saved()).toEqual([]);
     });
 
     it('keeps the retry count and original due time across the restart', async () => {
@@ -455,7 +453,7 @@ describe('Sequencer', () => {
       t.bhyve.startWatering.mockRejectedValue(new Error('socket down'));
 
       // Due 25 min ago, 4 attempts already: only 5 min of the retry window left.
-      await t.sequencer.resume([t.leftBehind(saved({ dueAt: new Date(NOW.getTime() - 25 * MIN), attempts: 4 }))]);
+      await t.sequencer.resume([await t.leftBehind(saved({ dueAt: new Date(NOW.getTime() - 25 * MIN), attempts: 4 }))]);
       await vi.advanceTimersByTimeAsync(10 * MIN);
 
       expect(t.audit.ofType('sequence.abandoned')[0]?.reason).toContain('after 6 attempt(s) over 30 min');
@@ -505,9 +503,11 @@ describe('Sequencer', () => {
       await t.sequencer.start({ ...TWO_CYCLES, zones: [front] }, {}, [decision]);
       await vi.advanceTimersByTimeAsync(40 * MIN);
 
-      const [seq] = t.db.select().from(wateringSequence).all();
-      expect(seq).toMatchObject({ deviceId: 'dev1', soakMinutes: 30, createdAt: NOW, status: 'completed', endedAt: new Date(NOW.getTime() + 40 * MIN) });
-      expect(t.db.select().from(sequenceZone).all()).toEqual([
+      const { prisma } = t.db;
+      expect(await prisma.wateringSequence.findMany()).toEqual([
+        expect.objectContaining({ deviceId: 'dev1', soakMinutes: 30, createdAt: NOW, status: 'completed', endedAt: new Date(NOW.getTime() + 40 * MIN) }),
+      ]);
+      expect(await prisma.sequenceZone.findMany()).toEqual([
         expect.objectContaining({
           zoneKey: 'dev1:1',
           zoneName: 'Front',
@@ -521,19 +521,20 @@ describe('Sequencer', () => {
         }),
       ]);
       expect(
-        t.db
-          .select({ wave: sequenceWave.waveIndex, status: sequenceWave.status, dueAt: sequenceWave.dueAt, sentAt: sequenceWave.sentAt, delivery: sequenceWave.delivery })
-          .from(sequenceWave)
-          .orderBy(asc(sequenceWave.waveIndex))
-          .all(),
+        await prisma.sequenceWave.findMany({
+          orderBy: { waveIndex: 'asc' },
+          select: { waveIndex: true, status: true, dueAt: true, sentAt: true, delivery: true },
+        }),
       ).toEqual([
-        { wave: 0, status: 'delivered', dueAt: NOW, sentAt: NOW, delivery: 'event' },
-        { wave: 1, status: 'delivered', dueAt: new Date(NOW.getTime() + 40 * MIN), sentAt: new Date(NOW.getTime() + 40 * MIN), delivery: 'event' },
+        { waveIndex: 0, status: 'delivered', dueAt: NOW, sentAt: NOW, delivery: 'event' },
+        { waveIndex: 1, status: 'delivered', dueAt: new Date(NOW.getTime() + 40 * MIN), sentAt: new Date(NOW.getTime() + 40 * MIN), delivery: 'event' },
       ]);
-      expect(t.db.select({ zoneKey: zoneWatering.zoneKey, startedAt: zoneWatering.startedAt, minutes: zoneWatering.minutes }).from(zoneWatering).all()).toEqual(
+      expect(await prisma.zoneWatering.findMany({ orderBy: { id: 'asc' }, select: { zoneKey: true, startedAt: true, minutes: true } })).toEqual(
         t.history.runs.map((r) => ({ zoneKey: r.zoneKey, startedAt: r.at, minutes: r.minutes })),
       );
-      expect(t.db.select().from(sequenceResult).get()).toMatchObject({ plannedMinutes: 20, deliveredMinutes: 20, waterOffAt: new Date(NOW.getTime() + 50 * MIN) });
+      expect(await t.store.sequenceResults()).toEqual([
+        expect.objectContaining({ plannedMinutes: 20, deliveredMinutes: 20, waterOffAt: new Date(NOW.getTime() + 50 * MIN) }),
+      ]);
     });
 
     it('gives every sequence a full UUID (kept forever; messages show the first 8 characters)', async () => {
@@ -550,18 +551,20 @@ describe('Sequencer', () => {
       await t.sequencer.start(TWO_CYCLES);
       await vi.advanceTimersByTimeAsync(60 * MIN);
 
-      expect(t.db.select({ status: sequenceWave.status, failed: sequenceWave.failedAttempts }).from(sequenceWave).orderBy(asc(sequenceWave.waveIndex)).all()).toEqual([
-        { status: 'skipped', failed: 7 },
-        { status: 'skipped', failed: 0 },
+      expect(await t.db.prisma.sequenceWave.findMany({ orderBy: { waveIndex: 'asc' }, select: { status: true, failedAttempts: true } })).toEqual([
+        { status: 'skipped', failedAttempts: 7 },
+        { status: 'skipped', failedAttempts: 0 },
       ]);
-      expect(t.db.select().from(sequenceResult).get()).toMatchObject({
-        status: 'abandoned',
-        abandonReason: expect.stringContaining('gave up on cycle 1/2 after 7 attempt(s)'),
-        cyclesDelivered: 0,
-        deliveredMinutes: 0,
-        failedAttempts: 7,
-      });
-      expect(t.db.select().from(zoneWatering).all()).toEqual([]);
+      expect(await t.store.sequenceResults()).toEqual([
+        expect.objectContaining({
+          status: 'abandoned',
+          abandonReason: expect.stringContaining('gave up on cycle 1/2 after 7 attempt(s)'),
+          cyclesDelivered: 0,
+          deliveredMinutes: 0,
+          failedAttempts: 7,
+        }),
+      ]);
+      expect(await t.db.prisma.zoneWatering.count()).toBe(0);
     });
 
     it('stores a wave it could not confirm as unconfirmed, and one found in flight as assumed', async () => {
@@ -573,9 +576,9 @@ describe('Sequencer', () => {
       await vi.advanceTimersByTimeAsync(20_000);
       await result;
 
-      expect(t.db.select({ delivery: sequenceWave.delivery }).from(sequenceWave).all()).toEqual([{ delivery: 'unconfirmed' }]);
+      expect(await t.db.prisma.sequenceWave.findMany({ select: { delivery: true } })).toEqual([{ delivery: 'unconfirmed' }]);
 
-      const resumed = t.leftBehind({
+      const resumed = await t.leftBehind({
         id: 'crashed',
         deviceId: 'dev2',
         waves: [wave([3, 5])],
@@ -587,12 +590,8 @@ describe('Sequencer', () => {
         inFlight: { wave: 0, since: NOW },
       });
       await t.sequencer.resume([resumed]);
-      expect(t.db.select({ delivery: sequenceWave.delivery }).from(sequenceWave).where(eq(sequenceWave.sequenceId, 'crashed')).all()).toEqual([
-        { delivery: 'assumed' },
-      ]);
-      expect(t.db.select({ status: wateringSequence.status }).from(wateringSequence).where(eq(wateringSequence.id, 'crashed')).get()).toEqual({
-        status: 'completed',
-      });
+      expect(await t.db.prisma.sequenceWave.findMany({ where: { sequenceId: 'crashed' }, select: { delivery: true } })).toEqual([{ delivery: 'assumed' }]);
+      expect(await t.db.prisma.wateringSequence.findUnique({ where: { id: 'crashed' }, select: { status: true } })).toEqual({ status: 'completed' });
     });
 
     it('keeps watering through a storage outage, then catches the database up, reporting the outage once', async () => {
@@ -600,20 +599,21 @@ describe('Sequencer', () => {
       const audit = new MemoryAuditLog(() => new Date());
       const history = new WateringHistory();
       const db = openDatabase(':memory:');
+      const store = new SqliteStore(db);
       const sequencer = new Sequencer({
         bhyve: fake.control,
         history,
         audit,
         health: new ConnectionHealth(audit, () => new Date()),
-        store: guardStore(new SqliteStore(db), audit),
+        store: guardStore(store, audit),
         options: { confirmTimeoutSeconds: 20, retryWindowMinutes: 30, resumeWindowMinutes: 60 },
         now: () => new Date(),
       });
-      db.$client.exec('PRAGMA query_only = ON'); // every write now fails like a read-only or full disk would
+      db.sqlite.exec('PRAGMA query_only = ON'); // every write now fails like a read-only or full disk would
 
       await expect(sequencer.start({ ...TWO_CYCLES, zones: [front] }, {}, [decision])).resolves.toBe('delivered');
-      expect(db.select().from(wateringSequence).all()).toEqual([]);
-      db.$client.exec('PRAGMA query_only = OFF');
+      expect(await db.prisma.wateringSequence.count()).toBe(0);
+      db.sqlite.exec('PRAGMA query_only = OFF');
       await vi.advanceTimersByTimeAsync(40 * MIN);
 
       expect(fake.bhyve.startWatering).toHaveBeenCalledTimes(2);
@@ -621,15 +621,16 @@ describe('Sequencer', () => {
       expect(audit.ofType('state.save_restored')).toEqual([expect.objectContaining({ failures: 3, outageMinutes: 40 })]);
       expect(log.error).toHaveBeenCalledOnce(); // not once per failed write
       // Everything written in order after the outage, as if nothing had happened:
-      expect(db.select().from(sequenceResult).get()).toMatchObject({ status: 'completed', cyclesDelivered: 2, deliveredMinutes: 20 });
-      expect(db.select({ delivery: sequenceWave.delivery, sentAt: sequenceWave.sentAt }).from(sequenceWave).orderBy(asc(sequenceWave.waveIndex)).all()).toEqual([
+      expect(await store.sequenceResults()).toEqual([expect.objectContaining({ status: 'completed', cyclesDelivered: 2, deliveredMinutes: 20 })]);
+      expect(await db.prisma.sequenceWave.findMany({ orderBy: { waveIndex: 'asc' }, select: { delivery: true, sentAt: true } })).toEqual([
         { delivery: 'event', sentAt: NOW },
         { delivery: 'event', sentAt: new Date(NOW.getTime() + 40 * MIN) },
       ]);
-      expect(db.select({ zoneKey: zoneWatering.zoneKey, startedAt: zoneWatering.startedAt, minutes: zoneWatering.minutes }).from(zoneWatering).all()).toEqual(
+      expect(await db.prisma.zoneWatering.findMany({ orderBy: { id: 'asc' }, select: { zoneKey: true, startedAt: true, minutes: true } })).toEqual(
         history.runs.map((r) => ({ zoneKey: r.zoneKey, startedAt: r.at, minutes: r.minutes })),
       );
-      expect(db.select({ detail: sequenceZone.detail }).from(sequenceZone).all()).toEqual([{ detail: decision.detail }]);
-  });
+      expect(await db.prisma.sequenceZone.findMany({ select: { detail: true } })).toEqual([{ detail: decision.detail }]);
+      await db.close();
+    });
   });
 });

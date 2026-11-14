@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { PendingSequence } from '../../conductor/state.ts';
-import { guardStore, isTransientStorageError, MAX_BACKLOG, noStore, type ConductorStore } from '../../conductor/store.ts';
+import { guardStore, isTransientStorageError, MAX_BACKLOG, noStore, storageErrorOf, type ConductorStore } from '../../conductor/store.ts';
 import { log } from '../../log.ts';
 import { NOW } from '../utils/conductor.ts';
 
@@ -21,7 +21,7 @@ const recorder = () => {
   const store = Object.fromEntries(
     (Object.keys(noStore) as (keyof ConductorStore)[]).map((m) => [
       m,
-      (...args: unknown[]) => {
+      async (...args: unknown[]) => {
         if (failWith) throw failWith;
         calls.push([m, structuredClone(args)]);
       },
@@ -74,20 +74,20 @@ describe('guardStore', () => {
     vi.restoreAllMocks();
   });
 
-  it('passes every call through while storage works, and audits nothing', () => {
+  it('passes every call through while storage works, and audits nothing', async () => {
     const r = recorder();
     const audit = new MemoryAuditLog(() => NOW);
     const g = guardStore(r.store, audit, () => NOW);
 
-    g.sequenceStarted(seq(), []);
-    g.waveSending(seq(), 0, NOW);
-    g.saveAlerts({});
+    await g.sequenceStarted(seq(), []);
+    await g.waveSending(seq(), 0, NOW);
+    await g.saveAlerts({});
 
     expect(r.calls.map(([m]) => m)).toEqual(['sequenceStarted', 'waveSending', 'saveAlerts']);
     expect(audit.events).toEqual([]);
   });
 
-  it('never throws, and replays what failed in order, with the arguments as they were, once storage is back', () => {
+  it('never rejects, and replays what failed in order, with the arguments as they were, once storage is back', async () => {
     const r = recorder();
     const audit = new MemoryAuditLog(() => NOW);
     let now = NOW;
@@ -95,15 +95,15 @@ describe('guardStore', () => {
     const s = seq();
 
     r.fail(wrapped(sqliteError('database or disk is full', DISK_FULL)));
-    expect(() => g.sequenceStarted(s, [])).not.toThrow();
+    await expect(g.sequenceStarted(s, [])).resolves.toBeUndefined();
     s.nextWave = 1; // the caller moves on while the write is pending
-    g.waveSending(s, 0, NOW);
-    g.recordReadings([], NOW);
+    await g.waveSending(s, 0, NOW);
+    await g.recordReadings([], NOW);
     expect(r.calls).toEqual([]);
 
     r.fail(undefined);
     now = new Date(NOW.getTime() + 30 * 60_000);
-    g.saveAlerts({ 'device:d': { state: 'offline', since: NOW.toISOString() } });
+    await g.saveAlerts({ 'device:d': { state: 'offline', since: NOW.toISOString() } });
 
     expect(r.calls.map(([m]) => m)).toEqual(['sequenceStarted', 'waveSending', 'recordReadings', 'saveAlerts']);
     expect((r.calls[0]?.[1][0] as PendingSequence).nextWave).toBe(0); // as it was when the write was made
@@ -113,28 +113,28 @@ describe('guardStore', () => {
     expect(error).toHaveBeenCalledOnce(); // one log line per outage, not per write
   });
 
-  it('skips a write that can never succeed, without holding up the ones after it', () => {
+  it('skips a write that can never succeed, without holding up the ones after it', async () => {
     const r = recorder();
     const audit = new MemoryAuditLog(() => NOW);
     const g = guardStore(r.store, audit, () => NOW);
 
     r.fail(sqliteError('UNIQUE constraint failed: watering_sequence.device_id', CONSTRAINT_UNIQUE));
-    g.sequenceStarted(seq(), []);
+    await g.sequenceStarted(seq(), []);
     r.fail(undefined);
-    g.waveSending(seq(), 0, NOW);
+    await g.waveSending(seq(), 0, NOW);
 
     expect(r.calls.map(([m]) => m)).toEqual(['waveSending']); // the failed one is not retried
     expect(audit.events.map((e) => e.type)).toEqual(['state.save_failed', 'state.save_restored']);
     expect(audit.events[0]).toMatchObject({ step: 'sequenceStarted', error: expect.stringContaining('UNIQUE') });
   });
 
-  it('drops a write found in the backlog that now fails for good, and carries on with the rest', () => {
+  it('drops a write found in the backlog that now fails for good, and carries on with the rest', async () => {
     const r = recorder();
     const audit = new MemoryAuditLog(() => NOW);
     let attempts = 0;
     const store: ConductorStore = {
       ...r.store,
-      waveFailed: () => {
+      waveFailed: async () => {
         attempts++;
         // First the disk hiccups; on replay the row turns out to be gone (e.g. the sequence was purged).
         throw attempts === 1 ? sqliteError('disk I/O error', IO_ERROR_WRITE) : new Error('no matching row');
@@ -142,8 +142,8 @@ describe('guardStore', () => {
     };
     const g = guardStore(store, audit, () => NOW);
 
-    g.waveFailed(seq(), 0); // transient: kept for replay
-    g.waveSending(seq(), 0, NOW); // replays waveFailed (now permanent: dropped), then this one
+    await g.waveFailed(seq(), 0); // transient: kept for replay
+    await g.waveSending(seq(), 0, NOW); // replays waveFailed (now permanent: dropped), then this one
 
     expect(attempts).toBe(2);
     expect(r.calls.map(([m]) => m)).toEqual(['waveSending']);
@@ -151,14 +151,14 @@ describe('guardStore', () => {
     expect(audit.events[1]).toMatchObject({ failures: 2, lastError: 'no matching row' });
   });
 
-  it('keeps at most MAX_BACKLOG writes, dropping the oldest', () => {
+  it('keeps at most MAX_BACKLOG writes, dropping the oldest', async () => {
     const r = recorder();
     const g = guardStore(r.store, new MemoryAuditLog(() => NOW), () => NOW);
 
     r.fail(sqliteError('database or disk is full', DISK_FULL));
-    for (let i = 0; i < MAX_BACKLOG + 5; i++) g.waveSending(seq(), i, NOW);
+    for (let i = 0; i < MAX_BACKLOG + 5; i++) await g.waveSending(seq(), i, NOW);
     r.fail(undefined);
-    g.saveAlerts({});
+    await g.saveAlerts({});
 
     // The backlog never holds more than MAX_BACKLOG: the write that ended the outage pushed out one more.
     expect(r.calls).toHaveLength(MAX_BACKLOG);
@@ -167,26 +167,78 @@ describe('guardStore', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('dropped the oldest unsaved waveSending'));
   });
 
-  it('reports a new outage after a recovery', () => {
+  it('reports a new outage after a recovery', async () => {
     const r = recorder();
     const audit = new MemoryAuditLog(() => NOW);
     const g = guardStore(r.store, audit, () => NOW);
 
     for (let round = 0; round < 2; round++) {
       r.fail(sqliteError('database or disk is full', DISK_FULL));
-      g.saveAlerts({});
+      await g.saveAlerts({});
       r.fail(undefined);
-      g.saveAlerts({});
+      await g.saveAlerts({});
     }
 
     expect(audit.events.map((e) => e.type)).toEqual(['state.save_failed', 'state.save_restored', 'state.save_failed', 'state.save_restored']);
   });
 });
 
+describe('guardStore ordering', () => {
+  beforeEach(() => {
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  it('writes in call order, even when callers do not wait and writes take different times', async () => {
+    const done: string[] = [];
+    const slow = (name: string, ms: number) => async () => {
+      await new Promise((r) => setTimeout(r, ms));
+      done.push(name);
+    };
+    const store = { ...noStore, sequenceStarted: slow('started', 30), waveSending: slow('sending', 1), saveAlerts: slow('alerts', 10) } as ConductorStore;
+    const g = guardStore(store, new MemoryAuditLog(() => NOW), () => NOW);
+
+    await Promise.all([g.sequenceStarted(seq(), []), g.waveSending(seq(), 0, NOW), g.saveAlerts({})]);
+
+    expect(done).toEqual(['started', 'sending', 'alerts']);
+  });
+});
+
+describe('storageErrorOf', () => {
+  beforeEach(() => {
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  it('finds what SQLite said in node:sqlite, driver adapter and Prisma errors', () => {
+    expect(storageErrorOf(sqliteError('disk I/O error', IO_ERROR_WRITE))).toEqual({ code: IO_ERROR_WRITE, message: 'disk I/O error' });
+    const prisma = Object.assign(new Error('Invalid `prisma.zone.create()` invocation:\n\nattempt to write a readonly database'), {
+      code: 'P2039',
+      meta: { driverAdapterError: { name: 'DriverAdapterError', cause: { kind: 'sqlite', extendedCode: 8, message: 'attempt to write a readonly database' } } },
+    });
+    expect(storageErrorOf(prisma)).toEqual({ kind: 'sqlite', code: 8, message: 'attempt to write a readonly database' });
+    expect(isTransientStorageError(prisma)).toBe(true);
+    const busy = Object.assign(new Error('x'), { meta: { driverAdapterError: { cause: { kind: 'SocketTimeout' } } } });
+    expect(isTransientStorageError(busy)).toBe(true);
+    const unique = Object.assign(new Error('x'), { meta: { driverAdapterError: { cause: { kind: 'UniqueConstraintViolation' } } } });
+    expect(isTransientStorageError(unique)).toBe(false);
+    expect(storageErrorOf(new Error('plain'))).toBeUndefined();
+    const loop: { cause?: unknown } = {};
+    loop.cause = loop;
+    expect(storageErrorOf(loop)).toBeUndefined();
+  });
+
+  it('reports the reason of a Prisma error without its call-site preamble', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const failing = { ...noStore, saveAlerts: async () => { throw new Error('Invalid `prisma.openAlert.createMany()` invocation in\n/x.ts:1:1\n\nUnique constraint failed on the fields: (`alert_key`)'); } } as ConductorStore;
+    await guardStore(failing, audit, () => NOW).saveAlerts({});
+
+    expect(audit.ofType('state.save_failed')[0]).toMatchObject({ error: 'Unique constraint failed on the fields: (`alert_key`)' });
+  });
+});
+
 describe('noStore', () => {
-  it('accepts every step and keeps nothing', () => {
+  it('accepts every step and keeps nothing', async () => {
     for (const m of Object.keys(noStore) as (keyof ConductorStore)[]) {
-      expect(() => (noStore[m] as (...a: unknown[]) => void)()).not.toThrow();
+      await expect((noStore[m] as (...a: unknown[]) => Promise<void>)()).resolves.toBeUndefined();
     }
   });
 });

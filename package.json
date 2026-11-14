@@ -23,8 +23,9 @@
     "notify:test": "tsx src/scripts/notify-test.ts",
     "simulate": "tsx src/scripts/simulate.ts",
     "conductor:check": "tsx src/index.ts --once --dry-run",
-    "db:generate": "drizzle-kit generate",
-    "db:check": "drizzle-kit check",
+    "db:generate": "prisma generate",
+    "db:check": "tsx src/scripts/db-check.ts",
+    "db:migration": "tsx src/scripts/db-migration.ts",
     "db:migrate": "tsx src/scripts/db-migrate.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -46,15 +47,17 @@
     }
   },
   "devDependencies": {
+    "@prisma/schema-engine-wasm": "7.10.0-4.0edf323efd1d98336f3f0a68684b56f689b900d3",
     "@types/node": "^22.20.5",
     "@vitest/coverage-v8": "^5.1.0",
-    "drizzle-kit": "1.0.0-rc.5",
+    "prisma": "7.10.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   },
   "dependencies": {
-    "drizzle-orm": "1.0.0-rc.5",
+    "@prisma/client": "7.10.0",
+    "@prisma/driver-adapter-utils": "7.10.0",
     "zod": "^4.6.7"
   },
   "allowScripts": {

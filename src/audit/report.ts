@@ -114,6 +114,8 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
       return `could not save state (${String(e.step)}): ${String(e.error)}`;
     case 'state.save_restored':
       return `saving state works again after ${String(e.outageMinutes)} min (${String(e.failures)} failed saves; last error: ${String(e.lastError)})`;
+    case 'storage.transferred':
+      return `converted the database to the new storage format: ${Object.values((e.rows ?? {}) as Record<string, number>).reduce((a, b) => a + b, 0)} rows; the original is kept as ${String(e.backup)}`;
     case 'storage.imported':
       return `imported the previous version's files: ${String(e.runs)} runs, ${String(e.sequences)} pending sequences, ${String(e.alerts)} alerts, ${String(e.auditEvents)} audit events`;
     case 'connection.lost':
