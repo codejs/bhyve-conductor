@@ -178,6 +178,20 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
       return `telegram command /${String(e.command)} from user ${String(e.user)}: ${String(e.outcome)} in ${String(e.ms)} ms${
         e.error === undefined ? '' : ` (${String(e.error)})`
       }`;
+    case 'command.auth_failed':
+      return `telegram command /${String(e.command)} from user ${String(e.user)}: WRONG PASSPHRASE (${String(e.failures)} recent failure(s))`;
+    case 'command.locked':
+      return `telegram commands that change something LOCKED until ${at(e.until)} after ${String(e.failures)} wrong passphrase(s)`;
+    case 'conductor.paused': {
+      const held = Array.isArray(e.held) ? (e.held as unknown[]).length : 0;
+      return `conductor PAUSED by ${String(e.by)}${held > 0 ? ` (${held} watering sequence(s) on hold)` : ''}${e.sendInProgress ? '; a cycle was being sent' : ''}`;
+    }
+    case 'conductor.resumed': {
+      const list = (v: unknown) => (Array.isArray(v) && v.length > 0 ? v.map(String).join(', ') : 'none');
+      return `conductor resumed by ${String(e.by)} after ${String(e.pausedMinutes)} min (held sequences: ${String(e.held)}; continued: ${list(e.continued)}; discarded: ${list(e.discarded)})`;
+    }
+    case 'conductor.still_paused':
+      return `started while PAUSED (since ${at(e.since)} by ${String(e.by)})`;
     case 'command.rejected':
       return `telegram command${e.command === undefined ? '' : ` /${String(e.command)}`} REJECTED (${String(e.reason)}) from user ${String(
         e.user ?? '?',

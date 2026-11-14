@@ -81,6 +81,32 @@ describe('FileStateStore', () => {
     expect(await readdir(dir)).toEqual(['state.json']);
   });
 
+  it('remembers a pause across restarts', async () => {
+    const store = new FileStateStore(path);
+    await store.save({ history: new WateringHistory(), sequences: [sequence()], alerts: {}, paused: { since: NOW, by: '@owner via Telegram' } });
+
+    expect(JSON.parse(await readFile(path, 'utf8')).paused).toEqual({ since: '2026-07-01T12:00:00.000Z', by: '@owner via Telegram' });
+    const loaded = await store.load();
+    expect(loaded.paused).toEqual({ since: NOW, by: '@owner via Telegram' });
+    expect(loaded.sequences).toEqual([sequence()]);
+  });
+
+  it('writes nothing about pausing when not paused, and reads older files as not paused', async () => {
+    const store = new FileStateStore(path);
+    await store.save({ history: new WateringHistory(), sequences: [], alerts: {} });
+
+    expect(JSON.parse(await readFile(path, 'utf8'))).not.toHaveProperty('paused');
+    expect(await store.load()).not.toHaveProperty('paused');
+  });
+
+  it('rejects a malformed pause record like any other corruption', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    await writeFile(path, JSON.stringify({ runs: [], paused: { since: 'yesterday', by: 'x' } }));
+
+    expect(await new FileStateStore(path).load()).toEqual({ history: new WateringHistory(), sequences: [], alerts: {} });
+    expect(warn).toHaveBeenCalled();
+  });
+
   it.each([
     ['invalid JSON', '{ runs: '],
     ['the wrong shape', JSON.stringify({ runs: [{ zoneKey: 'a', at: 'yesterday', minutes: 5 }] })],

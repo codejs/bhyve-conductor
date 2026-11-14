@@ -81,6 +81,12 @@ const EnvSchema = z.object({
       ),
     ),
 
+  /**
+   * Passphrase for the commands that change something (/pause, /resume); without it they are off.
+   * Checked at startup (length, no answer words...); see bot/conversation.ts. Quote it in .env.
+   */
+  TELEGRAM_COMMAND_PASSPHRASE: blankAsUnset(z.string().optional()),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

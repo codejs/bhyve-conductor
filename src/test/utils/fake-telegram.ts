@@ -1,7 +1,7 @@
 import { vi } from 'vitest';
 import type { BotApi } from '../../bot/bot.ts';
 import type { Clock } from '../../clock.ts';
-import type { GetUpdatesOptions, TelegramMessage, TelegramUpdate, TelegramUser } from '../../notify/telegram.ts';
+import type { GetUpdatesOptions, SendOptions, TelegramMessage, TelegramUpdate, TelegramUser } from '../../notify/telegram.ts';
 
 /**
  * The Telegram Bot API as the command bot sees it. getUpdates behaves like a real long poll: it
@@ -9,6 +9,10 @@ import type { GetUpdatesOptions, TelegramMessage, TelegramUpdate, TelegramUser }
  */
 export const fakeBotApi = (me: TelegramUser = { id: 999, is_bot: true, username: 'LawnBot' }) => {
   const queue: (TelegramUpdate[] | Error)[] = [];
+  /** Messages sent directly (conversation prompts and results), in order. */
+  const sent: { html: string; opts: SendOptions | undefined }[] = [];
+  /** Ids of deleted messages, in order. */
+  const deleted: number[] = [];
   let waiter: { resolve: (u: TelegramUpdate[]) => void; reject: (e: unknown) => void } | undefined;
 
   const api = {
@@ -31,11 +35,23 @@ export const fakeBotApi = (me: TelegramUser = { id: 999, is_bot: true, username:
         }),
     ),
     setMyCommands: vi.fn(async (_commands: readonly { command: string; description: string }[], _chatId: number): Promise<void> => {}),
+    sendMessage: vi.fn(async (html: string, opts?: SendOptions): Promise<void> => {
+      sent.push({ html, opts });
+    }),
+    deleteMessage: vi.fn(async (messageId: number): Promise<void> => {
+      deleted.push(messageId);
+    }),
   };
 
   return {
     api,
     bot: api as BotApi,
+    sent,
+    deleted,
+    /** Texts of the messages sent directly. */
+    texts: () => sent.map((m) => m.html),
+    /** The last message sent directly. */
+    last: () => sent.at(-1)?.html,
     /** Delivers one batch of updates: to the waiting long poll, or to the next one. */
     push: (...updates: TelegramUpdate[]) => {
       if (waiter) {

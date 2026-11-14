@@ -30,11 +30,20 @@ export interface PendingSequence {
   inFlight?: { wave: number; since: Date };
 }
 
+/** The conductor was paused: no supplemental watering until resumed. Survives restarts. */
+export interface PauseInfo {
+  since: Date;
+  /** Who paused it, for messages (e.g. "@owner via Telegram"). */
+  by: string;
+}
+
 export interface ConductorState {
   history: WateringHistory;
   sequences: PendingSequence[];
   /** Open alert conditions (see alerts.ts). */
   alerts: AlertState;
+  /** Set while paused. */
+  paused?: PauseInfo;
 }
 
 const Run = z.object({ station: z.number().int().min(1), runTime: z.number().positive() });
@@ -58,6 +67,7 @@ const FileSchema = z.object({
     )
     .default([]),
   alerts: z.record(z.string(), z.object({ state: z.string(), since: z.iso.datetime() })).default({}),
+  paused: z.object({ since: z.iso.datetime(), by: z.string() }).optional(),
 });
 
 /** Persists history and pending sequences as one JSON file; writes go to a temp file first so a crash can't leave half a file. */
@@ -98,6 +108,7 @@ export class FileStateStore {
         ...(s.inFlight ? { inFlight: { wave: s.inFlight.wave, since: new Date(s.inFlight.since) } } : {}),
       })),
       alerts: parsed.alerts,
+      ...(parsed.paused ? { paused: { since: new Date(parsed.paused.since), by: parsed.paused.by } } : {}),
     };
   }
 
@@ -111,6 +122,8 @@ export class FileStateStore {
         ...(s.inFlight ? { inFlight: { wave: s.inFlight.wave, since: s.inFlight.since.toISOString() } } : {}),
       })),
       alerts: state.alerts,
+      // Only written while paused, so files stay as they were for everyone else.
+      ...(state.paused ? { paused: { since: state.paused.since.toISOString(), by: state.paused.by } } : {}),
     };
     const tmp = `${this.#path}.tmp`;
     await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, 'utf8');

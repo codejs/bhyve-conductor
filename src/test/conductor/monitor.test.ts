@@ -7,7 +7,7 @@ import type { ConductorConfig, ZoneConfig } from '../../conductor/config.ts';
 import { WateringHistory } from '../../conductor/history.ts';
 import { Monitor, POLL_DEADLINE_MS, type StateStore } from '../../conductor/monitor.ts';
 import { MemoryAuditLog } from '../../audit/audit.ts';
-import type { PendingSequence } from '../../conductor/state.ts';
+import type { ConductorState, PauseInfo, PendingSequence } from '../../conductor/state.ts';
 import { FileStateStore } from '../../conductor/state.ts';
 import { log } from '../../log.ts';
 import type { MoistureReading } from '../../sensors/types.ts';
@@ -41,6 +41,7 @@ const setup = (
     weather?: WeatherProvider;
     audit?: MemoryAuditLog;
     pendingSequences?: PendingSequence[];
+    paused?: PauseInfo;
   } = {},
 ) => {
   let readings: MoistureReading[] = [];
@@ -59,6 +60,7 @@ const setup = (
     ...(opts.weather ? { weather: opts.weather } : {}),
     ...(opts.audit ? { audit: opts.audit } : {}),
     ...(opts.pendingSequences ? { pendingSequences: opts.pendingSequences } : {}),
+    ...(opts.paused ? { paused: opts.paused } : {}),
     now: () => now,
   });
 
@@ -1161,6 +1163,7 @@ describe('Monitor.status', () => {
         { key: 'dev1:2', name: 'Back' },
       ],
       sequences: [],
+      wateringNow: [],
       outages: [],
       alerts: [],
     });
@@ -1248,7 +1251,11 @@ describe('Monitor.status', () => {
         cycles: 3,
         dueAt: new Date(NOW.getTime() + (11.7 + 30) * MINUTE_MS),
         attempts: 0,
+        stale: false,
       },
+    ]);
+    expect(t.monitor.status().wateringNow).toEqual([
+      { deviceId: 'dev1', zoneNames: ['Front'], cycle: 1, of: 3, until: new Date(NOW.getTime() + 11.7 * MINUTE_MS) },
     ]);
   });
 
@@ -1302,5 +1309,264 @@ describe('Monitor.status', () => {
     expect(t.source.read).not.toHaveBeenCalled();
     expect(t.bhyve.getDevices).not.toHaveBeenCalled();
     expect(t.bhyve.getDevice).not.toHaveBeenCalled();
+  });
+});
+
+describe('Monitor pause and resume', () => {
+  const MINUTE_MS = 60_000;
+  const INTERVAL_MS = 15 * MINUTE_MS;
+  const BY = '@owner via Telegram';
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // 35 min split into 11.7 + 11.7 + 11.6 with 30 min soaks: cycle 2 is due 41.7 min after cycle 1.
+  const cycling = () => zone({ name: 'Front', runMinutes: 35, maxCycleMinutes: 15, soakMinutes: 30, maxMinutesPerDay: 60 });
+  const CYCLE_GAP_MS = (11.7 + 30) * MINUTE_MS;
+  const savingStore = () => ({ save: vi.fn<(state: ConductorState) => Promise<void>>(async () => {}) });
+
+  it('starts no watering while paused, but keeps reading the sensors and alerting', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone({ name: 'Front', criticalLowPct: 15 })]), { audit });
+    t.setReadings(reading('s1', 10));
+    await t.monitor.pause(BY);
+
+    const result = await t.monitor.runCycle();
+
+    expect(result.decisions).toEqual([
+      expect.objectContaining({ action: 'skip', reason: 'paused', detail: expect.stringMatching(/, but the conductor is paused \(by @owner via Telegram\)$/) }),
+    ]);
+    expect(result.sent).toEqual([]);
+    expect(t.source.read).toHaveBeenCalledOnce();
+    expect(t.bhyve.getDevices).not.toHaveBeenCalled(); // nothing needs B-hyve when nothing can water
+    expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+    expect(audit.ofType('moisture.critical_low')).toHaveLength(1); // safety alerts still work
+    expect(audit.ofType('zone.decision')).toEqual([expect.objectContaining({ reason: 'paused', action: 'skip' })]);
+  });
+
+  it('waters again once resumed', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 10));
+    await t.monitor.pause(BY);
+    await t.monitor.runCycle();
+
+    await t.monitor.resume(BY, 'discard');
+    const result = await t.monitor.runCycle();
+
+    expect(result.sent).toHaveLength(1);
+    expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+  });
+
+  it('does not start watering decided by a poll that was under way when it was paused', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 10));
+    let devices: (d: BhyveDevice[]) => void = () => {};
+    t.bhyve.getDevices.mockImplementationOnce(() => new Promise((resolve) => (devices = resolve)));
+
+    const cycle = t.monitor.runCycle();
+    await flush();
+    await t.monitor.pause(BY); // while the poll waits for B-hyve
+    devices([bhyveDevice('dev1')]);
+    const result = await cycle;
+
+    expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+    expect(result.sent).toEqual([]);
+    expect(result.failed).toEqual([{ command: expect.objectContaining({ deviceId: 'dev1' }), error: expect.objectContaining({ message: expect.stringContaining('paused') }) }]);
+  });
+
+  it('holds a sequence in progress, and reports it', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([cycling()]), { audit });
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle(); // cycle 1 sent
+
+    const result = await t.monitor.pause(BY);
+    vi.advanceTimersByTime(10 * CYCLE_GAP_MS);
+    await flush();
+
+    expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      changed: true,
+      paused: { since: NOW, by: BY },
+      held: [expect.objectContaining({ deviceId: 'dev1', zoneNames: ['Front'], nextCycle: 2, cycles: 3, stale: false })],
+      wateringNow: [{ deviceId: 'dev1', zoneNames: ['Front'], cycle: 1, of: 3, until: new Date(NOW.getTime() + 11.7 * MINUTE_MS) }],
+      sendInProgress: false,
+    });
+    expect(audit.ofType('conductor.paused')).toEqual([
+      expect.objectContaining({
+        by: BY,
+        held: [{ sequence: expect.any(String), device: 'dev1', zoneNames: ['Front'], nextCycle: 2, of: 3 }],
+        wateringNow: [{ device: 'dev1', zoneNames: ['Front'], until: new Date(NOW.getTime() + 11.7 * MINUTE_MS).toISOString() }],
+      }),
+    ]);
+    expect(t.monitor.status()).toMatchObject({ paused: { since: NOW, by: BY }, sequences: [expect.objectContaining({ nextCycle: 2 })] });
+  });
+
+  it('continues the held sequence on resume("continue")', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([cycling()]), { audit });
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+    await t.monitor.pause(BY);
+    t.advance(20);
+
+    const result = await t.monitor.resume(BY, 'continue');
+    vi.advanceTimersByTime(CYCLE_GAP_MS);
+    await flush();
+
+    expect(result).toEqual({
+      changed: true,
+      pausedMinutes: 20,
+      continued: [expect.objectContaining({ nextCycle: 2, cycles: 3 })],
+      discarded: [],
+    });
+    expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2);
+    expect(audit.ofType('conductor.resumed')).toEqual([
+      expect.objectContaining({ by: BY, pausedBy: BY, pausedMinutes: 20, held: 'continue', continued: [expect.any(String)], discarded: [] }),
+    ]);
+    expect(t.monitor.paused).toBeUndefined();
+  });
+
+  it('cancels the held sequence on resume("discard")', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([cycling()]), { audit });
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+    await t.monitor.pause(BY);
+
+    const result = await t.monitor.resume(BY, 'discard');
+    vi.advanceTimersByTime(10 * CYCLE_GAP_MS);
+    await flush();
+
+    expect(result.discarded).toEqual([{ sequence: expect.objectContaining({ nextCycle: 2 }), reason: `discarded by ${BY} when resuming` }]);
+    expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+    expect(audit.ofType('sequence.abandoned')).toEqual([expect.objectContaining({ reason: `discarded by ${BY} when resuming` })]);
+    expect(t.monitor.status().sequences).toEqual([]);
+  });
+
+  it('cancels a held sequence that became too old to continue, even when asked to continue', async () => {
+    const t = setup(config([cycling()], { recovery: { confirmTimeoutSeconds: 0, retryWindowMinutes: 30, resumeWindowMinutes: 60 } }));
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+    await t.monitor.pause(BY);
+    t.advance(180);
+    expect(t.monitor.status().sequences[0]?.stale).toBe(true);
+
+    const result = await t.monitor.resume(BY, 'continue');
+
+    expect(result.continued).toEqual([]);
+    expect(result.discarded).toEqual([{ sequence: expect.objectContaining({ stale: true }), reason: expect.stringMatching(/^too late to continue after the pause/) }]);
+  });
+
+  it('saves the pause (so a restart stays paused) and clears it on resume', async () => {
+    const store = savingStore();
+    const t = setup(config([zone()]), { store });
+
+    await t.monitor.pause(BY);
+    expect(store.save.mock.calls.at(-1)?.[0].paused).toEqual({ since: NOW, by: BY });
+
+    await t.monitor.resume(BY, 'discard');
+    expect(store.save.mock.calls.at(-1)?.[0]).not.toHaveProperty('paused');
+  });
+
+  it('does nothing when already paused, or not paused', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone()]), { audit });
+
+    await expect(t.monitor.resume(BY, 'continue')).resolves.toEqual({ changed: false, pausedMinutes: 0, continued: [], discarded: [] });
+    await t.monitor.pause(BY);
+    t.advance(5);
+    const again = await t.monitor.pause('someone else');
+
+    expect(again).toMatchObject({ changed: false, paused: { since: NOW, by: BY } });
+    expect(audit.ofType('conductor.paused')).toHaveLength(1);
+    expect(audit.ofType('conductor.resumed')).toHaveLength(0);
+  });
+
+  it('stays paused after a restart: saved sequences are held, not resumed, and nothing waters', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const pending: PendingSequence = {
+      id: 'abc',
+      deviceId: 'dev1',
+      waves: [[{ station: 1, runTime: 10 }], [{ station: 1, runTime: 10 }]],
+      soakMinutes: 30,
+      zoneNames: ['Front'],
+      createdAt: minutesAgo(20),
+      nextWave: 1,
+      dueAt: new Date(NOW.getTime() + 20 * MINUTE_MS),
+      attempts: 0,
+    };
+    const t = setup(config([zone()]), { audit, pendingSequences: [pending], paused: { since: minutesAgo(30), by: BY } });
+    t.setReadings(reading('s1', 10));
+
+    t.monitor.start();
+    await flush();
+    vi.advanceTimersByTime(2 * 60 * MINUTE_MS);
+    await flush();
+
+    expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+    expect(audit.ofType('sequence.resumed')).toEqual([]);
+    expect(t.monitor.status()).toMatchObject({ paused: { since: minutesAgo(30), by: BY }, sequences: [expect.objectContaining({ id: 'abc' })] });
+    expect(t.source.read.mock.calls.length).toBeGreaterThan(1); // still polling
+    await t.monitor.stop();
+  });
+
+  it('re-checks the zones right after resuming, instead of at the next poll', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 10));
+    await t.monitor.pause(BY);
+    t.monitor.start();
+    await flush();
+    vi.advanceTimersByTime(INTERVAL_MS);
+    await flush();
+    expect(t.source.read).toHaveBeenCalledTimes(2);
+    expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+
+    await t.monitor.resume(BY, 'discard');
+    expect(t.monitor.status().nextPollAt).toEqual(NOW);
+    vi.advanceTimersByTime(0);
+    await flush();
+
+    expect(t.source.read).toHaveBeenCalledTimes(3);
+    expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+    await t.monitor.stop();
+  });
+
+  it('does not poll on resume if it was never started (e.g. --once)', async () => {
+    const t = setup(config([zone()]));
+    await t.monitor.pause(BY);
+
+    await t.monitor.resume(BY, 'discard');
+    vi.advanceTimersByTime(INTERVAL_MS);
+    await flush();
+
+    expect(t.source.read).not.toHaveBeenCalled();
+  });
+
+  it('lets drain() finish while paused (--once must not wait forever for held watering)', async () => {
+    const t = setup(config([cycling()]));
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+
+    await t.monitor.pause(BY);
+
+    await expect(t.monitor.drain()).resolves.toBeUndefined();
+  });
+
+  it('returns copies from paused', async () => {
+    const t = setup(config([zone()]));
+    await t.monitor.pause(BY);
+
+    t.monitor.paused?.since.setFullYear(2000);
+
+    expect(t.monitor.paused?.since).toEqual(NOW);
   });
 });

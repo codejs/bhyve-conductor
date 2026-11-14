@@ -129,6 +129,26 @@ describe('describe / formatEvent', () => {
     );
   });
 
+  it('describes pausing, resuming and passphrase events', () => {
+    const d = (type: AuditEvent['type'], data: Record<string, unknown>) => describeEvent(ev(NOW.toISOString(), type, data), 'UTC');
+    expect(d('conductor.paused', { by: '@owner via Telegram', held: [] })).toBe('conductor PAUSED by @owner via Telegram');
+    expect(d('conductor.paused', { by: '@owner via Telegram', held: [{}, {}], sendInProgress: true })).toBe(
+      'conductor PAUSED by @owner via Telegram (2 watering sequence(s) on hold); a cycle was being sent',
+    );
+    expect(d('conductor.resumed', { by: '@owner via Telegram', pausedMinutes: 42, held: 'continue', continued: ['s1'], discarded: [] })).toBe(
+      'conductor resumed by @owner via Telegram after 42 min (held sequences: continue; continued: s1; discarded: none)',
+    );
+    expect(d('conductor.still_paused', { since: NOW.toISOString(), by: '@owner via Telegram' })).toBe(
+      'started while PAUSED (since 2026-07-01 12:00:00 by @owner via Telegram)',
+    );
+    expect(d('command.auth_failed', { command: 'pause', user: 4242, failures: 2 })).toBe(
+      'telegram command /pause from user 4242: WRONG PASSPHRASE (2 recent failure(s))',
+    );
+    expect(d('command.locked', { until: NOW.toISOString(), failures: 3 })).toBe(
+      'telegram commands that change something LOCKED until 2026-07-01 12:00:00 after 3 wrong passphrase(s)',
+    );
+  });
+
   it('falls back to the raw fields for unknown event types', () => {
     expect(describeEvent({ ts: NOW.toISOString(), type: 'future.event' as AuditEvent['type'], x: 1 })).toBe('{"x":1}');
   });

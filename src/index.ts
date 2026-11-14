@@ -7,7 +7,8 @@
  *   npm run conductor:check     one dry-run cycle, then exit (good for checking the config)
  *   npm run audit               review what happened (watering, outages, recoveries)
  * With TELEGRAM_COMMANDS=on, the Telegram chat can also ask for /status, /sensors_read and
- * /bhyve_devices (read-only; see docs/telegram-commands.md).
+ * /bhyve_devices, and with TELEGRAM_COMMAND_PASSPHRASE set, /pause and /resume automatic watering
+ * (see docs/telegram-commands.md).
  */
 import { parseArgs } from 'node:util';
 import { FileAuditLog, lastAuditEvent, teeAudit, type AuditSink } from './audit/audit.ts';
@@ -15,6 +16,8 @@ import { BhyveClient } from './bhyve/client.ts';
 import { commandPolicy } from './bot/auth.ts';
 import { CommandBot } from './bot/bot.ts';
 import { buildCommands, zonesBySensor } from './bot/commands.ts';
+import { buildControlCommands } from './bot/control.ts';
+import { passphraseProblem } from './bot/conversation.ts';
 import { assertForecastReady, loadConductorConfig } from './conductor/config.ts';
 import { Monitor } from './conductor/monitor.ts';
 import { FileStateStore } from './conductor/state.ts';
@@ -52,6 +55,7 @@ const main = async (): Promise<void> => {
     'TELEGRAM_CHAT_ID',
     'TELEGRAM_COMMANDS',
     'TELEGRAM_COMMAND_USER_IDS',
+    'TELEGRAM_COMMAND_PASSPHRASE',
   ]);
   const config = await loadConductorConfig(env.CONDUCTOR_CONFIG);
   if (args['dry-run']) config.dryRun = true;
@@ -73,6 +77,15 @@ const main = async (): Promise<void> => {
   });
   if (!policy && env.TELEGRAM_COMMAND_USER_IDS.length > 0) {
     log.warn('TELEGRAM_COMMAND_USER_IDS is set but TELEGRAM_COMMANDS is off: Telegram commands are disabled');
+  }
+  const passphrase = env.TELEGRAM_COMMAND_PASSPHRASE;
+  if (passphrase !== undefined) {
+    // The message never contains the passphrase itself.
+    const problem = passphraseProblem(passphrase);
+    if (problem) throw new Error(`TELEGRAM_COMMAND_PASSPHRASE ${problem}`);
+    if (!policy) log.warn('TELEGRAM_COMMAND_PASSPHRASE is set but TELEGRAM_COMMANDS is off: /pause and /resume are disabled');
+  } else if (policy) {
+    log.info('Telegram /pause and /resume are off: set TELEGRAM_COMMAND_PASSPHRASE to enable them');
   }
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
     if (config.dryRun) {
@@ -121,6 +134,11 @@ const main = async (): Promise<void> => {
 
   const store = new FileStateStore(env.CONDUCTOR_STATE);
   const state = await store.load();
+  if (state.paused) {
+    // A pause is deliberate (someone working in the yard, a leak...): a restart must not undo it.
+    log.warn(`Paused since ${state.paused.since.toISOString()} by ${state.paused.by}: no supplemental watering until resumed`);
+    audit.record('conductor.still_paused', { since: state.paused.since.toISOString(), by: state.paused.by });
+  }
   const monitor = new Monitor({
     config,
     source,
@@ -128,6 +146,7 @@ const main = async (): Promise<void> => {
     history: state.history,
     pendingSequences: state.sequences,
     alertState: state.alerts,
+    ...(state.paused ? { paused: state.paused } : {}),
     store,
     audit,
     ...(weather ? { weather } : {}),
@@ -147,7 +166,9 @@ const main = async (): Promise<void> => {
       status: () => monitor.status(),
       timeZone: config.notifications.timeZone,
     });
-    bot = new CommandBot({ api: telegram, policy, commands, reply: (html) => q.enqueue(html), audit });
+    // Pause/resume only exist with a passphrase; the bot refuses mutable commands without one anyway.
+    const control = passphrase === undefined ? [] : buildControlCommands({ control: monitor, timeZone: config.notifications.timeZone });
+    bot = new CommandBot({ api: telegram, policy, commands: [...commands, ...control], passphrase, reply: (html) => q.enqueue(html), audit });
   } else if (policy && args.once) {
     log.info('Telegram commands are only answered by the continuously running service (not with --once)');
   }

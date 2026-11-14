@@ -11,8 +11,8 @@ import { AlertTracker, type AlertState } from './alerts.ts';
 import type { ConductorConfig } from './config.ts';
 import type { WateringHistory } from './history.ts';
 import { applyDeviceState, applyForecast, evaluateZone, type DeviceCommand, type ZoneDecision } from './plan.ts';
-import { Sequencer } from './sequencer.ts';
-import type { ConductorState, PendingSequence } from './state.ts';
+import { Sequencer, type HeldSequence, type RunningWave } from './sequencer.ts';
+import type { ConductorState, PauseInfo, PendingSequence } from './state.ts';
 import type { ServiceName } from '../audit/health.ts';
 
 /** The parts of BhyveClient the monitor needs (lets tests pass a fake). */
@@ -31,6 +31,8 @@ export interface MonitorDeps {
   pendingSequences?: PendingSequence[];
   /** Alert conditions saved by a previous run (so they aren't reported again). */
   alertState?: AlertState;
+  /** Set if the conductor was paused when it last stopped: it stays paused. */
+  paused?: PauseInfo;
   /** Where to persist history and pending sequences. Omit to keep them in memory only. */
   store?: StateStore;
   /** Enables forecast-based amounts. Without it, dry zones get their fixed `runMinutes`. */
@@ -71,13 +73,53 @@ export interface ConductorStatus {
     name: string;
     decision?: { at: Date; action: ZoneDecision['action']; reason: string; detail: string; moisturePct?: number; runMinutes?: number };
   }[];
-  /** Watering sequences in progress (including ones waiting out a soak or a retry). */
-  sequences: { id: string; deviceId: string; zoneNames: string[]; nextCycle: number; cycles: number; dueAt: Date; attempts: number }[];
+  /** Set while paused: no supplemental watering (sensors are still read and alerts still sent). */
+  paused?: PauseInfo;
+  /** Watering sequences in progress (including ones waiting out a soak or a retry, or held by a pause). */
+  sequences: SequenceStatus[];
+  /** Cycles the conductor started whose run time hasn't elapsed: water is on. A pause doesn't turn it off. */
+  wateringNow: RunningWave[];
   /** Remote services currently unreachable. */
   outages: { service: ServiceName; since: Date; failures: number; lastError: string }[];
   /** Open alert conditions (low battery, critical moisture, controller offline...). */
   alerts: { key: string; state: string; since: Date }[];
 }
+
+export interface SequenceStatus {
+  id: string;
+  deviceId: string;
+  zoneNames: string[];
+  nextCycle: number;
+  cycles: number;
+  dueAt: Date;
+  attempts: number;
+  /** Its next cycle is so overdue that continuing it (after a pause) would abandon it instead. */
+  stale: boolean;
+}
+
+export interface PauseResult {
+  /** False if it was already paused. */
+  changed: boolean;
+  paused: PauseInfo;
+  /** Sequences now on hold. */
+  held: SequenceStatus[];
+  /** Water still on from cycles already started (a pause doesn't stop them). */
+  wateringNow: RunningWave[];
+  /** A cycle was being sent at the moment of the pause; it may still start. */
+  sendInProgress: boolean;
+}
+
+export interface ResumeResult {
+  /** False if it wasn't paused. */
+  changed: boolean;
+  pausedMinutes: number;
+  continued: SequenceStatus[];
+  /** Held sequences cancelled (by request, or because they were too old to continue), with why. */
+  discarded: { sequence: SequenceStatus; reason: string }[];
+}
+
+/** What to do with held sequences on resume. */
+export type HeldSequenceAction = 'continue' | 'discard';
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -89,7 +131,7 @@ export const POLL_DEADLINE_MS = 10 * MINUTE_MS;
 /** Decision reasons that mean the soil is below the threshold right now. */
 const BELOW_THRESHOLD = new Set(['dry', 'cooldown', 'daily-limit', 'forecast-covered']);
 /** Skip reasons that are normal operation rather than something to look into. */
-const EXPECTED_SKIPS = new Set(['cooldown', 'daily-limit', 'rain-delay', 'already-watering', 'soaking']);
+const EXPECTED_SKIPS = new Set(['cooldown', 'daily-limit', 'rain-delay', 'already-watering', 'soaking', 'paused']);
 
 const noAudit: AuditSink = { record: () => {} };
 
@@ -124,6 +166,7 @@ export class Monitor {
   #pollStartedAt: Date | undefined;
   #lastPoll: ConductorStatus['lastPoll'];
   #nextPollAt: Date | undefined;
+  #paused: PauseInfo | undefined;
 
   constructor(deps: MonitorDeps) {
     this.#deps = deps;
@@ -142,6 +185,15 @@ export class Monitor {
       clock: this.#clock,
     });
     this.#alerts = new AlertTracker(this.#audit, deps.config.alerts, this.#now, deps.alertState);
+    if (deps.paused) {
+      this.#paused = { since: new Date(deps.paused.since), by: deps.paused.by };
+      this.#sequencer.pause();
+    }
+  }
+
+  /** Set while paused. */
+  get paused(): PauseInfo | undefined {
+    return this.#paused ? { ...this.#paused, since: new Date(this.#paused.since) } : undefined;
   }
 
   get health(): ConnectionHealth {
@@ -153,7 +205,10 @@ export class Monitor {
     if (this.#resumed) return;
     this.#resumed = true;
     const pending = this.#deps.pendingSequences ?? [];
-    if (pending.length > 0 && !this.#deps.config.dryRun) await this.#sequencer.resume(pending);
+    if (pending.length === 0 || this.#deps.config.dryRun) return;
+    // Paused: keep them on hold, to be continued or discarded on resume.
+    if (this.#paused) this.#sequencer.hold(pending);
+    else await this.#sequencer.resume(pending);
   }
 
   /** Runs one poll → decide → water cycle. Throws if the sensors or B-hyve can't be read. */
@@ -171,6 +226,13 @@ export class Monitor {
     alertsChanged = this.#alerts.checkDecisions(decisions) || alertsChanged;
     let commands: DeviceCommand[] = [];
 
+    // Paused: keep reading the sensors (alerts matter most now), but start nothing.
+    const paused = this.#paused;
+    if (paused) {
+      decisions = decisions.map((d) =>
+        d.action === 'water' ? { ...d, action: 'skip', reason: 'paused', detail: `${d.detail}, but the conductor is paused (by ${paused.by})` } : d,
+      );
+    }
     // A device mid-sequence (soaking, or retrying after a connection problem) may look idle; leave it alone.
     decisions = decisions.map((d) =>
       d.action === 'water' && this.#sequencer.isActive(d.zone.deviceId)
@@ -208,6 +270,12 @@ export class Monitor {
     const sent: DeviceCommand[] = [];
     const failed: CycleResult['failed'] = [];
     for (const command of commands) {
+      // Paused while this poll was under way (e.g. waiting for B-hyve): don't start anything.
+      if (this.#paused) {
+        log.info(`Not watering device ${command.deviceId}: the conductor was paused during this poll`);
+        failed.push({ command, error: new Error(`watering on device ${command.deviceId} not started: the conductor is paused`) });
+        continue;
+      }
       if (config.dryRun) {
         const single = command.waves.length === 1;
         const cycles = single
@@ -369,7 +437,12 @@ export class Monitor {
       const longestCooldown = Math.max(0, ...config.zones.map((z) => z.cooldownMinutes));
       history.prune(now, longestCooldown * MINUTE_MS);
       try {
-        await store?.save({ history, sequences: this.#sequencer.pending(), alerts: this.#alerts.state });
+        await store?.save({
+          history,
+          sequences: this.#sequencer.pending(),
+          alerts: this.#alerts.state,
+          ...(this.#paused ? { paused: this.#paused } : {}),
+        });
       } catch (err) {
         // Watering carries on, but a restart now could water a zone again too soon or lose a sequence.
         log.error('Could not save state; cooldowns and pending cycles will not survive a restart', err);
@@ -410,18 +483,76 @@ export class Monitor {
           },
         };
       }),
-      sequences: this.#sequencer.pending().map((seq) => ({
-        id: seq.id,
-        deviceId: seq.deviceId,
-        zoneNames: [...(seq.zoneNames ?? [])],
-        nextCycle: seq.nextWave + 1,
-        cycles: seq.waves.length,
-        dueAt: new Date(seq.dueAt),
-        attempts: seq.attempts,
-      })),
+      ...(this.#paused ? { paused: { ...this.#paused, since: new Date(this.#paused.since) } } : {}),
+      sequences: this.#sequencer.held().map(sequenceStatus),
+      wateringNow: this.#sequencer.wateringNow(),
       outages: this.#health.outages(),
       alerts: Object.entries(this.#alerts.state).map(([key, v]) => ({ key, state: v.state, since: new Date(v.since) })),
     };
+  }
+
+  /**
+   * Stops supplemental watering until resume(): nothing new starts, and held sequences send no further
+   * cycles. Sensors are still polled and alerts still sent. Water already running is not turned off.
+   * The pause is saved, so it survives a restart.
+   */
+  async pause(by: string): Promise<PauseResult> {
+    if (this.#paused) {
+      return { changed: false, paused: { ...this.#paused }, held: this.#sequencer.held().map(sequenceStatus), wateringNow: this.#sequencer.wateringNow(), sendInProgress: false };
+    }
+    this.#paused = { since: this.#now(), by };
+    const sendInProgress = this.#sequencer.pause();
+    const held = this.#sequencer.held().map(sequenceStatus);
+    const wateringNow = this.#sequencer.wateringNow();
+    log.warn(`Conductor paused by ${by}: no supplemental watering until resumed`);
+    this.#audit.record('conductor.paused', {
+      by,
+      held: held.map((h) => ({ sequence: h.id, device: h.deviceId, zoneNames: h.zoneNames, nextCycle: h.nextCycle, of: h.cycles })),
+      ...(wateringNow.length > 0 ? { wateringNow: wateringNow.map((w) => ({ device: w.deviceId, zoneNames: w.zoneNames, until: w.until.toISOString() })) } : {}),
+      ...(sendInProgress ? { sendInProgress } : {}),
+    });
+    await this.#persist();
+    return { changed: true, paused: { ...this.#paused }, held, wateringNow, sendInProgress };
+  }
+
+  /**
+   * Ends a pause. Held sequences are continued (each only if it's not too old, as after a restart) or
+   * discarded; either way the zones are re-checked straight away.
+   */
+  async resume(by: string, held: HeldSequenceAction): Promise<ResumeResult> {
+    const paused = this.#paused;
+    if (!paused) return { changed: false, pausedMinutes: 0, continued: [], discarded: [] };
+    const before = new Map(this.#sequencer.held().map((h) => [h.seq.id, sequenceStatus(h)]));
+    const status = (seq: PendingSequence): SequenceStatus => before.get(seq.id) ?? sequenceStatus({ seq, dueAt: seq.dueAt, stale: false });
+    let continued: SequenceStatus[] = [];
+    let discarded: ResumeResult['discarded'] = [];
+    if (held === 'continue') {
+      const result = await this.#sequencer.continueHeld();
+      continued = result.continued.map(status);
+      discarded = result.abandoned.map((a) => ({ sequence: status(a.seq), reason: a.reason }));
+    } else {
+      const reason = `discarded by ${by} when resuming`;
+      discarded = (await this.#sequencer.discardHeld(reason)).map((seq) => ({ sequence: status(seq), reason }));
+    }
+    this.#paused = undefined;
+    const pausedMinutes = Math.round(((this.#now().getTime() - paused.since.getTime()) / MINUTE_MS) * 10) / 10;
+    log.info(`Conductor resumed by ${by} after ${pausedMinutes} min`);
+    this.#audit.record('conductor.resumed', {
+      by,
+      pausedBy: paused.by,
+      pausedMinutes,
+      held,
+      continued: continued.map((c) => c.id),
+      discarded: discarded.map((d) => d.sequence.id),
+    });
+    await this.#persist();
+    // Re-check the zones now rather than at the next scheduled poll.
+    if (this.#running && !this.#inFlight) {
+      this.#clock.clearTimeout(this.#timer);
+      this.#timer = this.#clock.setTimeout(() => this.#tick(), 0);
+      this.#nextPollAt = this.#now();
+    }
+    return { changed: true, pausedMinutes, continued, discarded };
   }
 
   /** Polls now and then every `pollIntervalMinutes` (measured from the end of each cycle, so cycles never overlap). */
@@ -482,6 +613,17 @@ export class Monitor {
     await this.#saveQueue;
   }
 }
+
+const sequenceStatus = ({ seq, dueAt, stale }: HeldSequence): SequenceStatus => ({
+  id: seq.id,
+  deviceId: seq.deviceId,
+  zoneNames: [...(seq.zoneNames ?? [])],
+  nextCycle: seq.nextWave + 1,
+  cycles: seq.waves.length,
+  dueAt: new Date(dueAt),
+  attempts: seq.attempts,
+  stale,
+});
 
 const waveSummary = (wave: readonly { station: number; runTime: number }[]): string =>
   wave.map((r) => `station ${r.station} for ${r.runTime} min`).join(', ');

@@ -35,6 +35,8 @@ export type DecisionReason =
   | 'already-watering'
   /** The device is mid cycle-and-soak; new runs would cut that sequence short. */
   | 'soaking'
+  /** Needs water, but the conductor is paused (e.g. with /pause in Telegram). */
+  | 'paused'
   | 'unknown-station';
 
 export interface ZoneDecision {

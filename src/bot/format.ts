@@ -126,7 +126,7 @@ const REASON_ICON: Record<string, string> = {
   dry: '🟠',
   'forecast-covered': '🌧️',
   'no-data': '📵',
-  cooldown: '⏸️',
+  cooldown: '🕒',
   'daily-limit': '⏱️',
   'device-not-found': '❓',
   'device-offline': '📴',
@@ -134,6 +134,7 @@ const REASON_ICON: Record<string, string> = {
   'rain-delay': '☔',
   'already-watering': '💧',
   soaking: '💧',
+  paused: '⏸️',
   'unknown-station': '❓',
 };
 
@@ -144,6 +145,12 @@ export const formatStatus = (s: ConductorStatus, timeZone?: string): string => {
 
   if (!s.running) lines.push('⏹️ Monitoring is <b>not running</b>');
   else if (s.startedAt) lines.push(`▶️ Running since ${at(s.startedAt)} (${ago(s.startedAt)}), polling every ${s.pollIntervalMinutes} min`);
+  if (s.paused) {
+    lines.push(
+      `⏸️ <b>Paused</b> since ${at(s.paused.since)} by ${safe(s.paused.by)}: no supplemental watering ` +
+        '(sensors are still read and alerts still sent). /resume to resume.',
+    );
+  }
   if (s.polling) lines.push('🔄 Polling right now');
   if (s.lastPoll) {
     const p = s.lastPoll;
@@ -171,12 +178,20 @@ export const formatStatus = (s: ConductorStatus, timeZone?: string): string => {
   }
 
   if (s.sequences.length > 0) {
-    lines.push('', '<b>Watering in progress</b>');
+    lines.push('', s.paused ? '<b>Watering on hold</b>' : '<b>Watering in progress</b>');
     for (const q of s.sequences) {
       const who = q.zoneNames.length > 0 ? q.zoneNames.join(', ') : q.deviceId;
-      const when = q.dueAt.getTime() > s.at.getTime() ? `due ${at(q.dueAt)}` : 'due now';
+      const when = q.dueAt.getTime() > s.at.getTime() ? `due ${at(q.dueAt)}` : s.paused ? `due since ${at(q.dueAt)}` : 'due now';
       const retry = q.attempts > 0 ? `, ${q.attempts} failed attempt(s)` : '';
-      lines.push(`💧 ${safe(who)}: cycle ${q.nextCycle}/${q.cycles} ${when}${retry}`);
+      const stale = s.paused && q.stale ? ', too late to continue' : '';
+      lines.push(`${s.paused ? '⏸️' : '💧'} ${safe(who)}: cycle ${q.nextCycle}/${q.cycles} ${when}${retry}${stale}`);
+    }
+  }
+  if (s.wateringNow.length > 0) {
+    lines.push('', '<b>Water on now</b>');
+    for (const w of s.wateringNow) {
+      const who = w.zoneNames.length > 0 ? w.zoneNames.join(', ') : w.deviceId;
+      lines.push(`💧 ${safe(who)}: cycle ${w.cycle}/${w.of} until ${at(w.until)}`);
     }
   }
 

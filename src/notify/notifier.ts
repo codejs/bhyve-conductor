@@ -282,6 +282,15 @@ export class Notifier implements AuditSink {
       case 'state.save_failed':
         return { severity: 'critical', text: `💾 <b>Can’t save state</b>: ${str(e.error)}\nCooldowns and pending cycles won’t survive a restart.` };
 
+      case 'conductor.still_paused':
+        // Worded as what happened at restart: queued notifications can arrive after a quick /resume.
+        return {
+          severity: 'warning',
+          text:
+            `⏸️ <b>Restarted while paused</b> at ${at(e.ts)} (paused since ${at(e.since)} by ${str(e.by)}): ` +
+            'no supplemental watering until /resume. /status shows the current state.',
+        };
+
       // ----- Telegram commands -----
       case 'command.rejected': {
         // Forwarded or inline-bot messages from the right people are only audited; strangers get reported.

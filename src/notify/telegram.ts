@@ -83,6 +83,18 @@ export interface GetUpdatesOptions {
   signal?: AbortSignal;
 }
 
+export interface SendOptions {
+  /** Reply to this message (sent anyway if it has been deleted). */
+  replyToMessageId?: number;
+  /**
+   * Open the reply box for the person being replied to (and only them, in a group). Their answer is then
+   * a reply to the bot, which the bot receives even with group privacy mode on.
+   */
+  forceReply?: boolean;
+  /** Hint shown in the reply box. */
+  placeholder?: string;
+}
+
 /** Extra time on top of the long-poll wait before the HTTP request itself is considered hung. */
 const LONG_POLL_MARGIN_MS = 15_000;
 
@@ -95,12 +107,31 @@ export class TelegramClient {
 
   /** Sends an HTML-formatted message. */
   async send(html: string): Promise<void> {
+    await this.sendMessage(html);
+  }
+
+  /** Sends an HTML-formatted message, optionally as a reply that asks for an answer. */
+  async sendMessage(html: string, opts: SendOptions = {}): Promise<void> {
     await this.#call('sendMessage', {
       chat_id: this.#opts.chatId,
       text: html,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
+      ...(opts.replyToMessageId !== undefined
+        ? { reply_parameters: { message_id: opts.replyToMessageId, allow_sending_without_reply: true } }
+        : {}),
+      ...(opts.forceReply
+        ? { reply_markup: { force_reply: true, selective: true, ...(opts.placeholder ? { input_field_placeholder: opts.placeholder.slice(0, 64) } : {}) } }
+        : {}),
     });
+  }
+
+  /**
+   * Deletes a message in the chat. In a private chat a bot can delete what the user sent it; in a group
+   * it needs the "Delete messages" admin right. Messages older than 48 h can't be deleted.
+   */
+  async deleteMessage(messageId: number): Promise<void> {
+    await this.#call('deleteMessage', { chat_id: this.#opts.chatId, message_id: messageId });
   }
 
   /** The bot's own account (its username is needed to recognise "/command@ThisBot"). */

@@ -271,4 +271,37 @@ describe('Notifier', () => {
       expect(t.sent).toEqual([]);
     });
   });
+
+  describe('pause', () => {
+    it('reminds that the conductor restarted while paused, dated (it may be delivered after a quick /resume)', async () => {
+      const t = setup();
+      await t.clock.advanceBy(90 * MIN);
+      t.record('conductor.still_paused', { since: START.toISOString(), by: '@owner via Telegram' });
+
+      expect(t.sent).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          text:
+            '⏸️ <b>Restarted while paused</b> at Jul 1, 08:30 (paused since Jul 1, 07:00 by @owner via Telegram): ' +
+            'no supplemental watering until /resume. /status shows the current state.',
+        }),
+      ]);
+    });
+
+    it('escapes who paused it', () => {
+      const t = setup();
+      t.record('conductor.still_paused', { since: START.toISOString(), by: '<b>x</b>' });
+      expect(t.texts()[0]).toContain('by &lt;b&gt;x&lt;/b&gt;');
+    });
+
+    it('does not notify pauses, resumes or passphrase events (the chat is answered directly)', () => {
+      const t = setup();
+      t.record('conductor.paused', { by: 'x', held: [] });
+      t.record('conductor.resumed', { by: 'x', pausedMinutes: 3 });
+      t.record('command.auth_failed', { command: 'pause', user: 1, failures: 1 });
+      t.record('command.locked', { until: START.toISOString(), failures: 3 });
+
+      expect(t.sent).toEqual([]);
+    });
+  });
 });

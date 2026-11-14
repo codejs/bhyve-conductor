@@ -467,4 +467,275 @@ describe('Sequencer', () => {
       expect(t.sequencer.pending()).toEqual([expect.objectContaining({ nextWave: 1 })]);
     });
   });
+
+  describe('pause', () => {
+    /** Cycle 1 at 12:00 (10 min), cycle 2 due 12:40. */
+    const startTwoCycles = async (t: ReturnType<typeof setup>) => {
+      await t.sequencer.start({ ...TWO_CYCLES, zones: [zone({ name: 'Front' })] });
+    };
+
+    it('holds a sequence: no further cycle is sent, however long the pause', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+
+      expect(t.sequencer.pause()).toBe(false); // nothing being sent right now
+      await vi.advanceTimersByTimeAsync(5 * 60 * MIN);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      expect(t.sequencer.paused).toBe(true);
+      expect(t.sequencer.pending()).toEqual([expect.objectContaining({ nextWave: 1 })]);
+      expect(t.sequencer.isActive('dev1')).toBe(true);
+    });
+
+    it('releases drain() (nothing will progress while paused)', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      const drained = t.sequencer.drain();
+
+      t.sequencer.pause();
+
+      await expect(drained).resolves.toBeUndefined();
+      await expect(t.sequencer.drain()).resolves.toBeUndefined();
+    });
+
+    it('refuses to start a new sequence while paused', async () => {
+      const t = setup();
+      t.sequencer.pause();
+
+      await expect(t.sequencer.start(TWO_CYCLES)).resolves.toBe('held');
+
+      expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+      expect(t.sequencer.pending()).toEqual([]);
+      expect(t.types()).toEqual([]);
+    });
+
+    it('lists held sequences with their due time, and which are too old to continue', async () => {
+      const t = setup({ resumeWindowMinutes: 60 });
+      await startTwoCycles(t);
+      t.sequencer.pause();
+
+      expect(t.sequencer.held()).toEqual([{ seq: expect.objectContaining({ nextWave: 1 }), dueAt: new Date(NOW.getTime() + 40 * MIN), stale: false }]);
+      await vi.advanceTimersByTimeAsync(100 * MIN); // due at +40, so 60 min overdue: still just within
+      expect(t.sequencer.held()[0]?.stale).toBe(false);
+      await vi.advanceTimersByTimeAsync(1 * MIN);
+      expect(t.sequencer.held()[0]?.stale).toBe(true);
+    });
+
+    it('continues a held sequence at its due time if resumed before it', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      t.sequencer.pause();
+      await vi.advanceTimersByTimeAsync(20 * MIN);
+
+      const result = await t.sequencer.continueHeld();
+
+      expect(result).toEqual({ continued: [expect.objectContaining({ nextWave: 1 })], abandoned: [] });
+      expect(t.sequencer.paused).toBe(false);
+      expect(t.audit.ofType('sequence.resumed')).toEqual([expect.objectContaining({ nextCycle: 2, of: 2, after: 'pause', zoneNames: ['Front'] })]);
+      await vi.advanceTimersByTimeAsync(20 * MIN - 1);
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2);
+      expect(t.audit.ofType('sequence.completed')).toHaveLength(1);
+    });
+
+    it('sends an overdue cycle at once when continued within the resume window', async () => {
+      const t = setup({ resumeWindowMinutes: 60 });
+      await startTwoCycles(t);
+      t.sequencer.pause();
+      await vi.advanceTimersByTimeAsync(70 * MIN); // 30 min overdue
+
+      await t.sequencer.continueHeld();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2);
+    });
+
+    it('abandons a held sequence that is too old to continue (the plan is stale), and says why', async () => {
+      const t = setup({ resumeWindowMinutes: 60 });
+      await startTwoCycles(t);
+      t.sequencer.pause();
+      await vi.advanceTimersByTimeAsync(120 * MIN); // due at +40: 80 min overdue
+
+      const result = await t.sequencer.continueHeld();
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+
+      const reason = 'too late to continue after the pause: cycle 2 was due 80 min ago';
+      expect(result).toEqual({ continued: [], abandoned: [{ seq: expect.objectContaining({ id: expect.any(String) }), reason }] });
+      expect(t.audit.ofType('sequence.abandoned')).toEqual([expect.objectContaining({ reason, cyclesDelivered: 1, of: 2 })]);
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      expect(t.snapshots.at(-1)).toEqual([]);
+    });
+
+    it('discards held sequences on request, keeping what was delivered in the history', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      t.sequencer.pause();
+
+      const discarded = await t.sequencer.discardHeld('discarded by @owner via Telegram when resuming');
+      await vi.advanceTimersByTimeAsync(5 * 60 * MIN);
+
+      expect(discarded).toEqual([expect.objectContaining({ nextWave: 1 })]);
+      expect(t.sequencer.paused).toBe(false);
+      expect(t.sequencer.pending()).toEqual([]);
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      expect(t.history.runs).toHaveLength(1);
+      expect(t.audit.ofType('sequence.abandoned')).toEqual([
+        expect.objectContaining({ reason: 'discarded by @owner via Telegram when resuming', deliveredMinutes: 10, plannedMinutes: 20 }),
+      ]);
+      expect(t.snapshots.at(-1)).toEqual([]);
+    });
+
+    it('sends nothing if paused while the device is being checked before a cycle', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      let answer: (d: BhyveDevice) => void = () => {};
+      t.bhyve.getDevice.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+      await vi.advanceTimersByTimeAsync(40 * MIN); // cycle 2 due: precheck under way
+      expect(t.bhyve.getDevice).toHaveBeenCalledOnce();
+
+      expect(t.sequencer.pause()).toBe(false);
+      answer(bhyveDevice('dev1'));
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce(); // only cycle 1
+      expect(t.sequencer.pending()).toEqual([expect.objectContaining({ nextWave: 1, attempts: 0 })]);
+      expect(t.snapshots.at(-1)?.[0]?.inFlight).toBeUndefined(); // never marked as being sent
+    });
+
+    it('says a cycle was being sent at the moment of the pause; it completes but nothing more is scheduled', async () => {
+      const t = setup();
+      await t.sequencer.start(command([wave([1, 10]), wave([1, 10]), wave([1, 10])]));
+      let delivered: () => void = () => {};
+      t.bhyve.startWatering.mockImplementationOnce(async (deviceId: string) => {
+        await new Promise<void>((resolve) => (delivered = resolve));
+        t.fake.emit({ event: 'watering_in_progress_notification', device_id: deviceId });
+      });
+      await vi.advanceTimersByTimeAsync(40 * MIN); // cycle 2 of 3 being sent
+
+      expect(t.sequencer.pause()).toBe(true);
+      delivered();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(t.audit.ofType('wave.confirmed')).toHaveLength(2);
+      expect(t.history.runs).toHaveLength(2);
+      expect(t.sequencer.pending()).toEqual([expect.objectContaining({ nextWave: 2 })]);
+      expect(vi.getTimerCount()).toBe(0); // no timer for cycle 3: it waits for a resume
+      expect(t.sequencer.pause()).toBe(false); // done sending now
+      await vi.advanceTimersByTimeAsync(5 * 60 * MIN);
+      expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2);
+    });
+
+    it('still reports the water going off when the last cycle was being sent at the pause', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      let delivered: () => void = () => {};
+      t.bhyve.startWatering.mockImplementationOnce(async (deviceId: string) => {
+        await new Promise<void>((resolve) => (delivered = resolve));
+        t.fake.emit({ event: 'watering_in_progress_notification', device_id: deviceId });
+      });
+      await vi.advanceTimersByTimeAsync(40 * MIN);
+
+      t.sequencer.pause();
+      delivered();
+      await vi.advanceTimersByTimeAsync(10 * MIN);
+
+      expect(t.types()).toContain('sequence.completed');
+      expect(t.types()).toContain('sequence.finished');
+      expect(t.sequencer.pending()).toEqual([]);
+    });
+
+    it('keeps a held sequence (no retry timer) when a send in progress at the pause fails', async () => {
+      const t = setup();
+      await t.sequencer.start(command([wave([1, 10]), wave([1, 10]), wave([1, 10])]));
+      let fail: (err: Error) => void = () => {};
+      t.bhyve.startWatering.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+      await vi.advanceTimersByTimeAsync(40 * MIN);
+
+      t.sequencer.pause();
+      fail(new Error('socket closed'));
+      await vi.advanceTimersByTimeAsync(5 * 60 * MIN);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2); // no retries while paused
+      expect(t.types()).not.toContain('wave.retry_scheduled');
+      expect(t.types()).not.toContain('sequence.abandoned');
+      expect(t.sequencer.pending()).toEqual([expect.objectContaining({ nextWave: 1, attempts: 1 })]);
+    });
+
+    it('takes saved sequences on hold at startup without sending anything, then continues them', async () => {
+      const t = setup();
+      const seq: PendingSequence = {
+        id: 'abc',
+        deviceId: 'dev1',
+        waves: [wave([1, 10]), wave([1, 10])],
+        soakMinutes: 30,
+        createdAt: new Date(NOW.getTime() - 40 * MIN),
+        nextWave: 1,
+        dueAt: new Date(NOW.getTime() + 5 * MIN),
+        attempts: 0,
+      };
+
+      t.sequencer.hold([seq, { ...seq, id: 'dup' }]); // one per device
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+      expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+      expect(t.sequencer.pending().map((p) => p.id)).toEqual(['abc']);
+      expect(t.types()).toEqual([]);
+
+      await t.sequencer.continueHeld(); // 55 min overdue: within the 60 min window
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+    });
+
+    it('does not call a sequence stale when its last cycle was found in flight (continuing only completes it)', async () => {
+      const t = setup({ resumeWindowMinutes: 60 });
+      const since = new Date(NOW.getTime() - 5 * 60 * MIN);
+      t.sequencer.hold([
+        {
+          id: 'abc',
+          deviceId: 'dev1',
+          waves: [wave([1, 10]), wave([1, 10])],
+          soakMinutes: 30,
+          createdAt: since,
+          nextWave: 1,
+          dueAt: since,
+          attempts: 0,
+          inFlight: { wave: 1, since },
+        },
+      ]);
+
+      expect(t.sequencer.held()[0]?.stale).toBe(false);
+      const result = await t.sequencer.continueHeld();
+
+      expect(result).toEqual({ continued: [], abandoned: [] });
+      expect(t.types()).toEqual(['wave.assumed_delivered', 'sequence.completed']);
+      expect(t.bhyve.startWatering).not.toHaveBeenCalled();
+    });
+
+    it('knows which cycles are running right now (a pause does not turn the water off)', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      t.sequencer.pause();
+
+      const now = t.sequencer.wateringNow();
+      expect(now).toEqual([{ deviceId: 'dev1', zoneNames: ['Front'], cycle: 1, of: 2, until: new Date(NOW.getTime() + 10 * MIN) }]);
+      now[0]?.zoneNames.push('changed');
+      expect(t.sequencer.wateringNow()[0]?.zoneNames).toEqual(['Front']);
+
+      await vi.advanceTimersByTimeAsync(10 * MIN);
+      expect(t.sequencer.wateringNow()).toEqual([]);
+    });
+
+    it('stop() while paused keeps held sequences for the next start', async () => {
+      const t = setup();
+      await startTwoCycles(t);
+      t.sequencer.pause();
+
+      t.sequencer.stop();
+      await t.sequencer.continueHeld(); // after stop, nothing is scheduled
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      expect(t.sequencer.pending()).toHaveLength(1);
+    });
+  });
 });

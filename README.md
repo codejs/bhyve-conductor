@@ -22,8 +22,10 @@ is; the conductor only adds water on top when the sensors say the schedule isn't
 - **Tells you what happened.** Every watering and connection event goes to an audit trail you can
   review with `npm run audit`. Alerts (low batteries, critically dry or wet soil, controller offline)
   can be sent to Telegram.
-- **Answers questions** (optional). Ask the Telegram bot for `/status`, `/sensors_read` or
-  `/bhyve_devices`. The commands are read-only and only work from your chat, for the people you list.
+- **Answers questions, and can be paused** (optional). Ask the Telegram bot for `/status`,
+  `/sensors_read` or `/bhyve_devices` (read-only). With a passphrase set, `/pause` and `/resume`
+  switch automatic watering off and on. Commands only work from your chat, for the people you list,
+  and changes always ask for the passphrase.
 
 ## Who it's for
 
@@ -81,7 +83,8 @@ Fill in `.env`:
 | `CONDUCTOR_STATE` | no | Watering history file (default `.conductor-state.json`) |
 | `CONDUCTOR_AUDIT` | no | Audit trail file (default `.conductor-audit.jsonl`) |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | Telegram alerts; see [docs/notifications.md](docs/notifications.md) |
-| `TELEGRAM_COMMANDS`, `TELEGRAM_COMMAND_USER_IDS` | no | Read-only Telegram commands (`on`/`off`, default `off`; user ids required for groups); see [docs/telegram-commands.md](docs/telegram-commands.md) |
+| `TELEGRAM_COMMANDS`, `TELEGRAM_COMMAND_USER_IDS` | no | Telegram commands (`on`/`off`, default `off`; user ids required for groups); see [docs/telegram-commands.md](docs/telegram-commands.md) |
+| `TELEGRAM_COMMAND_PASSPHRASE` | no | Enables `/pause` and `/resume`, which ask for it every time (quote it in `.env`) |
 | `LOG_LEVEL` | no | `debug`, `info` (default), `warn` or `error` |
 
 ### 3. Find your devices
@@ -159,7 +162,7 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 
 - [docs/disaster-recovery.md](docs/disaster-recovery.md): what happens when a service fails mid-watering, and how to review it
 - [docs/notifications.md](docs/notifications.md): Telegram setup and simulations
-- [docs/telegram-commands.md](docs/telegram-commands.md): asking the bot for status, sensor readings and devices, and how it is secured
+- [docs/telegram-commands.md](docs/telegram-commands.md): asking the bot for status, sensor readings and devices, pausing and resuming, and how it is secured
 
 ## TODO
 

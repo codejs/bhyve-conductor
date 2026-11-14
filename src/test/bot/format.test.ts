@@ -205,6 +205,7 @@ describe('formatStatus', () => {
       { key: 'dev2:1', name: 'New zone' },
     ],
     sequences: [],
+    wateringNow: [],
     outages: [],
     alerts: [],
     ...overrides,
@@ -237,8 +238,8 @@ describe('formatStatus', () => {
         polling: true,
         lastPoll: { startedAt: minutesAgo(20), finishedAt: minutesAgo(19), ok: false, error: 'Tuya GET /v1.0/token timed out after 20s' },
         sequences: [
-          { id: 'a1', deviceId: 'dev1', zoneNames: ['Back lawn'], nextCycle: 2, cycles: 3, dueAt: new Date(NOW.getTime() + 25 * MIN), attempts: 0 },
-          { id: 'b2', deviceId: 'dev2', zoneNames: [], nextCycle: 1, cycles: 1, dueAt: minutesAgo(2), attempts: 2 },
+          { id: 'a1', deviceId: 'dev1', zoneNames: ['Back lawn'], nextCycle: 2, cycles: 3, dueAt: new Date(NOW.getTime() + 25 * MIN), attempts: 0, stale: false },
+          { id: 'b2', deviceId: 'dev2', zoneNames: [], nextCycle: 1, cycles: 1, dueAt: minutesAgo(2), attempts: 2, stale: false },
         ],
         outages: [{ service: 'tuya', since: minutesAgo(45), failures: 3, lastError: 'timed out' }],
         alerts: [{ key: 'battery:sensor:s1', state: 'low', since: minutesAgo(600) }],
@@ -251,6 +252,46 @@ describe('formatStatus', () => {
     expect(html).toContain('🔴 tuya unreachable since Jul 1, 11:15 (3 failure(s)): timed out');
     expect(html).toContain('<b>Open alerts</b> (1)\n⚠️ battery:sensor:s1: low since Jul 1, 02:00');
     expect(html).not.toContain('All services reachable');
+  });
+
+  it('shows a pause, the watering on hold (and what is too old to continue), and water that is on', () => {
+    const html = formatStatus(
+      base({
+        paused: { since: minutesAgo(50), by: '@owner via Telegram' },
+        sequences: [
+          { id: 'a', deviceId: 'dev1', zoneNames: ['Front lawn'], nextCycle: 2, cycles: 3, dueAt: minutesAgo(20), attempts: 0, stale: false },
+          { id: 'b', deviceId: 'dev2', zoneNames: ['Back lawn'], nextCycle: 3, cycles: 3, dueAt: minutesAgo(90), attempts: 0, stale: true },
+          { id: 'c', deviceId: 'dev3', zoneNames: [], nextCycle: 2, cycles: 2, dueAt: new Date(NOW.getTime() + 5 * MIN), attempts: 0, stale: false },
+        ],
+        wateringNow: [{ deviceId: 'dev1', zoneNames: ['Front lawn'], cycle: 1, of: 3, until: new Date(NOW.getTime() + 4 * MIN) }],
+      }),
+      'UTC',
+    );
+    expect(html).toContain(
+      '⏸️ <b>Paused</b> since Jul 1, 11:10 by @owner via Telegram: no supplemental watering (sensors are still read and alerts still sent). /resume to resume.',
+    );
+    expect(html).toContain(
+      [
+        '<b>Watering on hold</b>',
+        '⏸️ Front lawn: cycle 2/3 due since Jul 1, 11:40',
+        '⏸️ Back lawn: cycle 3/3 due since Jul 1, 10:30, too late to continue',
+        '⏸️ dev3: cycle 2/2 due Jul 1, 12:05',
+      ].join('\n'),
+    );
+    expect(html).toContain('<b>Water on now</b>\n💧 Front lawn: cycle 1/3 until Jul 1, 12:04');
+  });
+
+  it('shows water on now without a pause, and a paused zone', () => {
+    const html = formatStatus(
+      base({
+        wateringNow: [{ deviceId: 'dev9', zoneNames: [], cycle: 2, of: 2, until: new Date(NOW.getTime() + MIN) }],
+        zones: [{ key: 'dev1:1', name: 'Front', decision: { at: NOW, action: 'skip', reason: 'paused', detail: '', moisturePct: 20 } }],
+      }),
+      'UTC',
+    );
+    expect(html).toContain('<b>Water on now</b>\n💧 dev9: cycle 2/2 until Jul 1, 12:01');
+    expect(html).toContain('⏸️ Front: paused, soil 20%');
+    expect(html).not.toContain('<b>Paused</b>');
   });
 
   it('says when monitoring is not running, or has not polled yet', () => {
@@ -271,7 +312,9 @@ describe('formatStatus', () => {
       base({
         lastPoll: { startedAt: NOW, finishedAt: NOW, ok: false, error: EVIL },
         zones: [{ key: EVIL, name: EVIL, decision: { at: NOW, action: 'skip', reason: EVIL, detail: EVIL } }],
-        sequences: [{ id: EVIL, deviceId: EVIL, zoneNames: [EVIL], nextCycle: 1, cycles: 2, dueAt: NOW, attempts: 0 }],
+        sequences: [{ id: EVIL, deviceId: EVIL, zoneNames: [EVIL], nextCycle: 1, cycles: 2, dueAt: NOW, attempts: 0, stale: false }],
+        wateringNow: [{ deviceId: EVIL, zoneNames: [EVIL], cycle: 1, of: 2, until: NOW }],
+        paused: { since: NOW, by: EVIL },
         outages: [{ service: 'tuya', since: NOW, failures: 1, lastError: EVIL }],
         alerts: [{ key: EVIL, state: EVIL, since: NOW }],
       }),

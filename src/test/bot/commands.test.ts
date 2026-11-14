@@ -13,6 +13,7 @@ const idleStatus = (): ConductorStatus => ({
   polling: false,
   zones: [],
   sequences: [],
+  wateringNow: [],
   outages: [],
   alerts: [],
 });

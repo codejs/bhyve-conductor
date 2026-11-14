@@ -57,6 +57,15 @@ export type AuditType =
   | 'command.handled'
   /** A Telegram command was ignored: wrong chat, user not allowed, forwarded... (throttled per sender). */
   | 'command.rejected'
+  /** A wrong passphrase was given for a command that changes something (/pause, /resume). */
+  | 'command.auth_failed'
+  /** Too many wrong passphrases: commands that change something are locked for a while. */
+  | 'command.locked'
+  /** Supplemental watering paused / resumed (e.g. /pause and /resume in Telegram). */
+  | 'conductor.paused'
+  | 'conductor.resumed'
+  /** The conductor started while paused (the pause survives restarts). */
+  | 'conductor.still_paused'
   /** A zone's decision changed (e.g. moist → dry → waiting for rain). Only changes are recorded. */
   | 'zone.decision'
   /** Marks what a simulation did (fault injected, time of day...); only in simulated trails. */

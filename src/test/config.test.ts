@@ -22,6 +22,7 @@ const ALL_KEYS = [
   'TELEGRAM_CHAT_ID',
   'TELEGRAM_COMMANDS',
   'TELEGRAM_COMMAND_USER_IDS',
+  'TELEGRAM_COMMAND_PASSPHRASE',
   'LOG_LEVEL',
 ] as const;
 
@@ -146,6 +147,14 @@ describe('loadConfig', () => {
       vi.stubEnv('TELEGRAM_COMMAND_USER_IDS', value);
       expect(load).toThrow(message);
     });
+  });
+
+  it('passes the command passphrase through as is (checked by the bot), and treats blank as not set', () => {
+    expect(loadConfig(['TELEGRAM_COMMAND_PASSPHRASE'])).toEqual({});
+    vi.stubEnv('TELEGRAM_COMMAND_PASSPHRASE', '   ');
+    expect(loadConfig(['TELEGRAM_COMMAND_PASSPHRASE'])).toEqual({});
+    vi.stubEnv('TELEGRAM_COMMAND_PASSPHRASE', 'open sesame 42');
+    expect(loadConfig(['TELEGRAM_COMMAND_PASSPHRASE'])).toEqual({ TELEGRAM_COMMAND_PASSPHRASE: 'open sesame 42' });
   });
 
   it('splits sensor IDs on commas and trims blanks', () => {

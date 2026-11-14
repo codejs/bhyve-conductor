@@ -4,10 +4,11 @@ import type { MoistureSource } from '../sensors/types.ts';
 import { formatDevices, formatReadings, formatStatus } from './format.ts';
 
 /**
- * The commands the Telegram bot answers. They are all READ-ONLY: nothing here can start or stop
- * watering or change a controller. That is enforced by the types below (the B-hyve client is narrowed
- * to `getDevices`), not just by convention. Adding a command that changes anything needs its own
- * review: confirmation, limits, and what happens if a message is replayed or the sender is spoofed.
+ * The read-only commands the Telegram bot answers: nothing here can start or stop watering or change
+ * a controller. That is enforced by the types below (the B-hyve client is narrowed to `getDevices`),
+ * not just by convention. Commands that change something (/pause, /resume) live in control.ts and
+ * always go through a conversation ending in the passphrase (conversation.ts, bot.ts); they still
+ * never talk to B-hyve directly.
  */
 
 export interface BotCommand {

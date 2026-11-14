@@ -224,6 +224,47 @@ describe('TelegramClient (commands)', () => {
     expect(((await pending) as Error).message).toBe('Telegram getUpdates aborted');
   });
 
+  it('sendMessage can reply to a message and open the answer box for that person only', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: {} }));
+
+    await client().sendMessage('Pause anyway?', { replyToMessageId: 77, forceReply: true, placeholder: 'yes or cancel' });
+
+    expect(fetchCall(fetchMock, 0).body).toEqual({
+      chat_id: '4242',
+      text: 'Pause anyway?',
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_parameters: { message_id: 77, allow_sending_without_reply: true },
+      reply_markup: { force_reply: true, selective: true, input_field_placeholder: 'yes or cancel' },
+    });
+  });
+
+  it('sendMessage without options is a plain message, and clips the placeholder to what Telegram allows', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ ok: true, result: {} }));
+
+    await client().sendMessage('hi');
+    await client().sendMessage('hi', { forceReply: true, placeholder: 'p'.repeat(100) });
+
+    expect(fetchCall(fetchMock, 0).body).toEqual({ chat_id: '4242', text: 'hi', parse_mode: 'HTML', disable_web_page_preview: true });
+    expect(fetchCall(fetchMock, 1).body).toMatchObject({ reply_markup: { force_reply: true, selective: true, input_field_placeholder: 'p'.repeat(64) } });
+  });
+
+  it('deleteMessage deletes a message in the configured chat', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: true }));
+
+    await client().deleteMessage(99);
+
+    const call = fetchCall(fetchMock, 0);
+    expect(call.url).toBe(`https://api.telegram.org/bot${TOKEN}/deleteMessage`);
+    expect(call.body).toEqual({ chat_id: '4242', message_id: 99 });
+  });
+
+  it("deleteMessage reports a message it can't delete as permanent", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: false, error_code: 400, description: "Bad Request: message can't be deleted" }, 400));
+
+    await expect(client().deleteMessage(99)).rejects.toBeInstanceOf(TelegramPermanentError);
+  });
+
   it('setMyCommands sets the menu for the one chat', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result: true }));
 
@@ -234,10 +275,17 @@ describe('TelegramClient (commands)', () => {
     expect(call.body).toEqual({ commands: [{ command: 'status', description: 'Status' }], scope: { type: 'chat', chat_id: -100123 } });
   });
 
-  it.each(['getMe', 'getUpdates', 'setMyCommands'] as const)('%s never puts the token in error messages', async (method) => {
+  it.each(['getMe', 'getUpdates', 'setMyCommands', 'sendMessage', 'deleteMessage'] as const)('%s never puts the token in error messages', async (method) => {
     fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
     const c = client();
-    const call = method === 'getMe' ? c.getMe() : method === 'getUpdates' ? c.getUpdates({ timeoutSeconds: 0 }) : c.setMyCommands([], 1);
+    const calls = {
+      getMe: () => c.getMe(),
+      getUpdates: () => c.getUpdates({ timeoutSeconds: 0 }),
+      setMyCommands: () => c.setMyCommands([], 1),
+      sendMessage: () => c.sendMessage('x', { forceReply: true }),
+      deleteMessage: () => c.deleteMessage(1),
+    };
+    const call = calls[method]();
 
     const err = (await call.catch((e: unknown) => e)) as Error;
 
