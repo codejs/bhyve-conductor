@@ -17,6 +17,7 @@ import {
   SIMULATION_TABLES,
   hasSimulationTables,
   listSimulations,
+  simulationEventCounts,
   simulationEvents,
   simulationNotifications,
   simulationSequences,
@@ -180,6 +181,22 @@ describe('storing a simulation result', () => {
     expect((await listSimulations(db, { scenarios: ['crash-mid-soak', 'nope'] })).map((r) => r.scenario)).toEqual(['crash-mid-soak']);
     const outage = (await listSimulations(db, { scenarios: ['bhyve-long-outage'] }))[0];
     expect(await simulationEvents(db, outage?.id ?? -1)).toEqual(sim('bhyve-long-outage').events);
+  });
+
+  it('counts events of some types per stored simulation, in one query', async () => {
+    const runs = new Map<string, number>();
+    for (const id of ['normal-watering', 'bhyve-long-outage', 'crash-mid-soak']) runs.set(id, (await storeSimulation(db, sim(id), STORED_AT)).id);
+    const types = ['connection.lost', 'connection.restored', 'sequence.abandoned', 'service.unclean_shutdown'];
+    const counts = await simulationEventCounts(db, new Set(types));
+
+    for (const [id, runId] of runs) {
+      const expected = sim(id).events.filter((e) => types.includes(e.type)).length;
+      expect(counts.get(runId) ?? 0).toBe(expected);
+    }
+    expect(counts.get(runs.get('bhyve-long-outage') ?? -1)).toBeGreaterThan(0);
+    // A simulation without any is absent, not 0.
+    expect(counts.has(runs.get('normal-watering') ?? -1)).toBe(false);
+    expect(await simulationEventCounts(db, [])).toEqual(new Map());
   });
 
   it('is all or nothing: a failure keeps the earlier result as it was', async () => {

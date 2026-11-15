@@ -12,7 +12,8 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.ts'],
       // The Prisma client is generated (npm run db:generate), not written here.
-      exclude: ['src/test/**', 'src/scripts/**', 'src/**/types.ts', 'src/db/generated/**'],
+      // http/contract.ts, like the types.ts files, holds only types.
+      exclude: ['src/test/**', 'src/scripts/**', 'src/**/types.ts', 'src/http/contract.ts', 'src/db/generated/**'],
     },
   },
 });

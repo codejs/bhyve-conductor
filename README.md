@@ -43,6 +43,7 @@ and are comfortable editing a JSON file and running a Node.js process on an alwa
 - [tsx](https://tsx.is/) to run TypeScript directly in development
 - [Vitest](https://vitest.dev/) for tests
 - [Prisma ORM](https://www.prisma.io/) 7 over Node's built-in `node:sqlite` (no native modules) for storage and migrations
+- [Hono](https://hono.dev/) for the read-only web API (`npm run web`)
 - External services: B-hyve cloud (REST + WebSocket), [Tuya IoT Platform](https://platform.tuya.com)
   OpenAPI, Open-Meteo forecast and geocoding (free, no API key), Telegram Bot API (optional)
 
@@ -80,6 +81,7 @@ Fill in `.env`:
 | `CONDUCTOR_DB` | no | SQLite database with the watering history and schedule, pending cycles, alerts and the audit trail (default `.conductor.db`); see [docs/sqlite-storage.md](docs/sqlite-storage.md) |
 | `CONDUCTOR_STATE`, `CONDUCTOR_AUDIT` | no | Files of versions before the database (defaults `.conductor-state.json`, `.conductor-audit.jsonl`); imported once on the first start, then renamed to `*.imported` |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | Telegram alerts; see [docs/notifications.md](docs/notifications.md) |
+| `WEB_HOST`, `WEB_PORT`, `WEB_ALLOWED_HOSTS` | no | Where `npm run web` listens (default `127.0.0.1:8787`, this machine only) and the extra host names it answers to; see [docs/web.md](docs/web.md) |
 | `LOG_LEVEL` | no | `debug`, `info` (default), `warn` or `error` |
 
 ### 3. Find your devices
@@ -148,6 +150,7 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 | `npm run weather:forecast` | Show the forecast and upcoming B-hyve runs the water budget uses |
 | `npm run audit` | Review the audit trail (`audit:summary`, `audit:recovery`; filters such as `-- --since 7d` or `-- --zone <deviceId>:2` are listed at the top of `src/scripts/audit.ts`). Stored simulations only show with `-- --for-simulation [--scenario <id>]` |
 | `npm run notify:test` | Send a test Telegram message |
+| `npm run web` | Serve the read-only web API over the stored simulations at `http://127.0.0.1:8787/api` (`-- --db <path>`, `--host`, `--port`); see [docs/web.md](docs/web.md) |
 | `npm run db:migrate` | Create or upgrade the SQLite database (`CONDUCTOR_DB`, or `-- --file <path>`), converting one of the drizzle-based version; the service does this itself at startup |
 | `npm run db:migration -- <name>` | Write a migration after changing `prisma/schema.prisma` (offline; the same SQL as `prisma migrate dev --create-only`) |
 | `npm run db:generate` / `npm run db:check` | Regenerate the Prisma client / check the migrations produce `prisma/schema.prisma` |
@@ -160,6 +163,7 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 
 - [docs/disaster-recovery.md](docs/disaster-recovery.md): what happens when a service fails mid-watering, and how to review it
 - [docs/notifications.md](docs/notifications.md): Telegram setup and simulations
+- [docs/web.md](docs/web.md): the web API (`npm run web`), its endpoints and its security model
 - [docs/sqlite-storage.md](docs/sqlite-storage.md): the SQLite data model (Prisma), migrations, the conversion from the drizzle-based version, and how to change the schema
 
 ## TODO

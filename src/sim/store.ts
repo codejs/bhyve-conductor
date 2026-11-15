@@ -149,6 +149,16 @@ export const simulationEvents = async (
   }));
 };
 
+/** How many events of the given types each stored simulation holds, by run id (runs with none are absent). */
+export const simulationEventCounts = async (db: ConductorDb, types: Iterable<string>): Promise<Map<number, number>> => {
+  const rows = await db.prisma.simulationEvent.groupBy({
+    by: ['simulationRunId'],
+    where: { type: { in: [...types] } },
+    _count: { _all: true },
+  });
+  return new Map(rows.map((r) => [r.simulationRunId, r._count._all]));
+};
+
 /** The Telegram messages a stored simulation would have sent, in order. */
 export const simulationNotifications = async (db: ConductorDb, runId: number): Promise<Notification[]> =>
   (await db.prisma.simulationNotification.findMany({ where: { simulationRunId: runId }, orderBy: { id: 'asc' } })).map((n) => ({

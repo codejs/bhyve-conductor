@@ -22,6 +22,7 @@
     "audit:recovery": "tsx src/scripts/audit.ts --recovery",
     "notify:test": "tsx src/scripts/notify-test.ts",
     "simulate": "tsx src/scripts/simulate.ts",
+    "web": "tsx src/scripts/web.ts",
     "conductor:check": "tsx src/index.ts --once --dry-run",
     "db:generate": "prisma generate",
     "db:check": "tsx src/scripts/db-check.ts",
@@ -30,7 +31,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "archive": "rm -f bhyve-conductor.zip && zip -rq bhyve-conductor.zip . -x '.git/*' '*/.git/*' '.idea/*' '*/.idea/*' 'node_modules/*' '*/node_modules/*' '.env' '*/.env' '.conductor.db*' 'dist/*' '*.zip' 'coverage/*' '.DS_Store' '*/.DS_Store' 'bhyve-conductor.zip'"
+    "archive": "rm -f bhyve-conductor.zip && zip -rq bhyve-conductor.zip . -x '.git/*' '*/.git/*' '.idea/*' '*/.idea/*' 'node_modules/*' '*/node_modules/*' '.env' '*/.env' '.conductor.db*' 'dist/*' '.vite/*' '*/.vite/*' '*.tsbuildinfo' '*.zip' 'coverage/*' '.DS_Store' '*/.DS_Store' 'bhyve-conductor.zip'"
   },
   "keywords": [],
   "author": "",
@@ -53,11 +54,15 @@
     "prisma": "7.10.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
+    "vite": "^8.3.8",
     "vitest": "^5.1.0"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.6",
+    "@hono/zod-validator": "^0.9.1",
     "@prisma/client": "7.10.0",
     "@prisma/driver-adapter-utils": "7.10.0",
+    "hono": "^4.13.17",
     "zod": "^4.6.7"
   },
   "allowScripts": {

@@ -21,6 +21,9 @@ const ALL_KEYS = [
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_CHAT_ID',
   'LOG_LEVEL',
+  'WEB_HOST',
+  'WEB_PORT',
+  'WEB_ALLOWED_HOSTS',
 ] as const;
 
 describe('loadConfig', () => {
@@ -119,5 +122,46 @@ describe('loadConfig', () => {
     vi.stubEnv(key, value);
 
     expect(() => loadConfig([key])).toThrow(key);
+  });
+  describe('web app (npm run web)', () => {
+    const WEB = ['WEB_HOST', 'WEB_PORT', 'WEB_ALLOWED_HOSTS'] as const;
+
+    it('defaults to this machine only, on port 8787', () => {
+      expect(loadConfig(WEB)).toEqual({ WEB_HOST: '127.0.0.1', WEB_PORT: 8787, WEB_ALLOWED_HOSTS: [] });
+    });
+
+    it('treats blanks (as copied from .env.example) as not set', () => {
+      vi.stubEnv('WEB_HOST', ' ');
+      vi.stubEnv('WEB_PORT', '');
+      vi.stubEnv('WEB_ALLOWED_HOSTS', '');
+      expect(loadConfig(WEB)).toEqual({ WEB_HOST: '127.0.0.1', WEB_PORT: 8787, WEB_ALLOWED_HOSTS: [] });
+    });
+
+    it('reads an address, a port and a list of host names', () => {
+      vi.stubEnv('WEB_HOST', ' 0.0.0.0 ');
+      vi.stubEnv('WEB_PORT', '9000');
+      vi.stubEnv('WEB_ALLOWED_HOSTS', ' garden-pi.local, 192.168.1.10 ,,[fd00::5]');
+      expect(loadConfig(WEB)).toEqual({ WEB_HOST: '0.0.0.0', WEB_PORT: 9000, WEB_ALLOWED_HOSTS: ['garden-pi.local', '192.168.1.10', '[fd00::5]'] });
+
+      vi.stubEnv('WEB_HOST', '::1');
+      expect(loadConfig(['WEB_HOST'])).toEqual({ WEB_HOST: '::1' });
+    });
+
+    it.each([
+      ['WEB_HOST', 'my host'],
+      ['WEB_HOST', 'http://localhost'],
+      ['WEB_HOST', 'a/b'],
+      ['WEB_PORT', 'http'],
+      ['WEB_PORT', '0'],
+      ['WEB_PORT', '65536'],
+      ['WEB_PORT', '80.5'],
+      ['WEB_PORT', '-1'],
+      ['WEB_ALLOWED_HOSTS', 'garden pi'],
+      ['WEB_ALLOWED_HOSTS', 'ok.local,evil/path'],
+      ['WEB_ALLOWED_HOSTS', 'user@evil.example'],
+    ] as const)('rejects %s=%j', (key, value) => {
+      vi.stubEnv(key, value);
+      expect(() => loadConfig([key])).toThrow(key);
+    });
   });
 });

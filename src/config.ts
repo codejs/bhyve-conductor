@@ -50,6 +50,24 @@ const EnvSchema = z.object({
   /** Numeric chat id (negative for groups) or @channelname. */
   TELEGRAM_CHAT_ID: blankAsUnset(z.string().regex(/^(-?\d+|@\w{4,})$/, 'expected a numeric chat id or @channelname').optional()),
 
+  /**
+   * Web app (`npm run web`): the address to listen on. The default, 127.0.0.1, is this machine only; the API has
+   * no login, so listen elsewhere (e.g. 0.0.0.0) only on a network you trust.
+   */
+  WEB_HOST: blankAsUnset(
+    z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9.:-]{1,253}$/, 'expected a host name or IP address, e.g. 127.0.0.1 or 0.0.0.0')
+      .default('127.0.0.1'),
+  ),
+  WEB_PORT: blankAsUnset(z.coerce.number().int().min(1).max(65_535).default(8787)),
+  /**
+   * More host names the web app answers to (comma-separated), e.g. garden-pi.local when WEB_HOST is 0.0.0.0.
+   * Requests for other names are refused (DNS rebinding). localhost, 127.0.0.1 and WEB_HOST always work.
+   */
+  WEB_ALLOWED_HOSTS: csv.pipe(z.array(z.string().regex(/^[A-Za-z0-9.:[\]-]{1,253}$/, 'expected host names, e.g. garden-pi.local'))),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 

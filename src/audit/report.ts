@@ -1,4 +1,4 @@
-import type { AuditEvent, AuditType } from './audit.ts';
+import type { AuditEvent, AuditType } from './types.ts';
 
 /** Event types that show something went wrong, or how it was recovered. */
 export const RECOVERY_TYPES: ReadonlySet<AuditType> = new Set<AuditType>([
