@@ -98,3 +98,28 @@ export type AuditEvent = Prisma.AuditEventModel
  * Sensor readings, each once (Tuya repeats a reading until the sensor reports again).
  */
 export type SensorReading = Prisma.SensorReadingModel
+/**
+ * Model SimulationRun
+ * One stored scenario run. Storing a scenario again replaces its previous result.
+ */
+export type SimulationRun = Prisma.SimulationRunModel
+/**
+ * Model SimulationEvent
+ * A simulated audit event: the same shape as audit_event.
+ */
+export type SimulationEvent = Prisma.SimulationEventModel
+/**
+ * Model SimulationNotification
+ * A Telegram message the simulated conductor would have sent.
+ */
+export type SimulationNotification = Prisma.SimulationNotificationModel
+/**
+ * Model SimulationSequence
+ * What each simulated watering sequence planned and delivered (SqliteStore.sequenceResults()).
+ */
+export type SimulationSequence = Prisma.SimulationSequenceModel
+/**
+ * Model SimulationWatering
+ * The simulated watering ledger.
+ */
+export type SimulationWatering = Prisma.SimulationWateringModel

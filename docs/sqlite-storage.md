@@ -53,6 +53,7 @@ Behaviour that shaped the design:
 | **2: results / explanations** | `sequence_zone` | why each zone was watered (reading, threshold, forecast budget) |
 | **3: behaviour** | `zone_state` | persists `#drySince` / `#noDataSince` (a behaviour change, see §6.7) |
 | | `sensor_reading` | calibration, anomaly detection, water-use reports (README TODO items) |
+| **4: review only** | `simulation_run` + `simulation_event`, `simulation_notification`, `simulation_sequence`, `simulation_watering` | simulation results kept with `npm run simulate -- --store`; only `npm run audit -- --for-simulation` reads them (§4) |
 
 ## 3. Model
 
@@ -64,6 +65,11 @@ service_run 1──* watering_sequence 1──* sequence_wave 1──* wave_stat
 open_alert    (stand-alone, current conditions only)
 audit_event   (stand-alone, no FKs; device/zone/sequence extracted from the JSON payload)
 sensor_reading(stand-alone)
+
+simulation_run 1──* simulation_event          (kept apart: no reference to or from the tables above)
+               1──* simulation_notification
+               1──* simulation_sequence
+               1──* simulation_watering
 ```
 
 `conductor.json` stays the source of truth for rules. `zone` rows are upserted from it at each start
@@ -112,6 +118,18 @@ deleted for retention.
 **`service_run`**: one row per process start, with a `heartbeat_at` updated after every poll. On start,
 rows with `stopped_at IS NULL` are the unclean shutdowns, and `heartbeat_at` is when they were last
 alive. Their `stop_reason` becomes `'unclean'`. The report names the crashed run's last audit event.
+
+**`simulation_run` and its children** hold the results of `npm run simulate -- --store`: per scenario its
+audit trail (`simulation_event`, the same shape and filter columns as `audit_event`), the Telegram messages
+it would have sent, each simulated sequence's outcome (`SqliteStore.sequenceResults()` at the end of the
+run) and its watering ledger. They are **separate tables, not a flag on the conductor's own**: simulated
+events carry virtual times (a summer day in 2026) and made-up devices, and nothing that runs the garden may
+ever see them. Crash detection reads the last `audit_event`, cooldowns and daily caps read
+`zone_watering`, the import of the JSON files checks that the database is unused, and `npm run audit`
+shows the last 24 hours; none of them look at `simulation_*`, so no query can forget a filter. The
+children reference their run with `ON DELETE CASCADE` and nothing else: no `zone` rows are created for
+the simulated garden. `scenario` is unique: storing a scenario again replaces its previous result, in
+one transaction (a failure keeps the previous one).
 
 **No views, triggers, generated columns or CHECK constraints.** The database holds tables and indexes
 only, all of them in `schema.prisma`. What the earlier version did with those objects now lives in code:
@@ -266,6 +284,8 @@ key, a second sequence on one device, an unknown alert, a torn audit line) are s
 | [`src/db/audit-log.ts`](../src/db/audit-log.ts) | `SqliteAuditLog` and the queries behind `npm run audit` |
 | [`src/db/service-run.ts`](../src/db/service-run.ts), [`session.ts`](../src/db/session.ts) | Runs, heartbeats, crash detection; one run's storage, shared by the service and the simulator |
 | [`src/db/legacy-import.ts`](../src/db/legacy-import.ts) | The one-time import of the JSON files |
+| [`src/sim/store.ts`](../src/sim/store.ts) | Stored simulation results: `storeSimulation()` (replacing), `listSimulations()`, `simulationEvents()`... |
+| [`src/sim/command.ts`](../src/sim/command.ts), [`src/audit/command.ts`](../src/audit/command.ts) | `npm run simulate` (`--store`) and `npm run audit` (`--for-simulation`); the scripts in `src/scripts/` only wire them to the console and `.env` |
 | [`src/db/schema-engine.ts`](../src/db/schema-engine.ts) | Development only: Prisma's schema engine (WebAssembly) behind `npm run db:migration` / `db:check` and the tests |
 
 Versions are pinned exactly: `prisma`, `@prisma/client` and `@prisma/driver-adapter-utils` 7.10.0, and
@@ -332,3 +352,5 @@ Everything runs against real SQLite databases (in memory, or files in a temp fol
 | `src/test/conductor/store.test.ts` | `guardStore()`: call order, replay in order, skipping permanent failures, one alert per outage, the backlog limit, finding SQLite's result code in Prisma's errors |
 | `src/test/conductor/sequencer.test.ts`, `monitor.test.ts` | The conductor on a real database: the in-flight marker is on disk before the send; schedule, reasons and results saved; a storage outage mid-sequence is caught up; restarts resume from the database; spells across quick and long restarts; readings; heartbeats; dry runs write nothing |
 | `src/test/sim/scenarios.test.ts` | Every simulated scenario (outages, crashes, owner interventions...) on the real storage: the database agrees with the audit trail |
+| `src/test/sim/store.test.ts` | Stored simulations come back exactly as simulated (events, notifications, sequences, ledger); filter columns; replacing a scenario (children too) while keeping the others; all-or-nothing; and that they stay out of the conductor's tables, its audit trail, watering history, crash detection and the JSON import; a database from before them (read-only, upgraded with a copy) |
+| `src/test/audit/command.test.ts`, `src/test/sim/command.test.ts`, `src/test/scripts/simulate-audit.test.ts` | `npm run audit` never shows a stored simulation, whatever the filters (time, type, device, zone, sequence, `--json`, `--summary`); `--for-simulation` with its filters, time zones, headers, errors and old databases; `npm run simulate` with and without `--store`, `--db`, replacing, next to the conductor's data, foreign files, `--telegram`; the real scripts as processes (CONDUCTOR_DB, exit codes) |

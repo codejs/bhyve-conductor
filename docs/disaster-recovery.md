@@ -53,7 +53,9 @@ sent, and the soak gaps between cycles.
   watering, crash restarts, the watchdog, state-save failures) arrive as messages. See
   [notifications.md](notifications.md).
 - Every scenario on this page can be replayed in virtual time with `npm run simulate`, which produces an
-  audit trail you can review with the commands below. See [notifications.md](notifications.md#simulations).
+  audit trail you can review with the commands below. With `--store` the results are kept in the database,
+  apart from the real trail: review them with `npm run audit -- --for-simulation`. See
+  [notifications.md](notifications.md#simulations).
 
 ## Reviewing what happened
 

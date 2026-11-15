@@ -111,6 +111,7 @@ npm run simulate -- crash-mid-soak tuya-outage   # several
 npm run simulate -- --all                        # all of them, plus a summary table
 npm run simulate -- --all --quiet                # just the summary table
 npm run simulate -- low-batteries --telegram     # also send its messages to your chat, to preview them
+npm run simulate -- --all --store                # also keep the results in the database (see below)
 ```
 
 | Scenario | What happens |
@@ -139,6 +140,35 @@ npm run audit -- --file simulations/bhyve-long-outage.audit.jsonl --since 2026-0
 npm run audit -- --file simulations/bhyve-long-outage.audit.jsonl --since 2026-01-01 --recovery
 ```
 
-(Simulated days are in 2026, so pass `--since`; the default is the last 24 hours.) The same
+(Simulated days are in 2026, so pass `--since`; the default is the last 24 hours.)
+
+### Keeping results in the database
+
+With `--store`, each scenario's result also goes into the conductor's database (`CONDUCTOR_DB`, or
+`--db <path>`): its audit trail, its messages, and each watering sequence's outcome and watering ledger.
+Storing a scenario again replaces its earlier result; the other scenarios stay. The files are written as
+before.
+
+Stored simulations are kept apart from the conductor's own records, in their own tables: they never
+appear in `npm run audit`, whatever the filters, and they don't affect watering, crash detection or
+alerts. To see them, add `--for-simulation`:
+
+```bash
+npm run audit -- --for-simulation                                     # every stored simulation
+npm run audit -- --for-simulation --scenario bhyve-long-outage --summary
+npm run audit -- --for-simulation --recovery                          # failures and recoveries, per scenario
+npm run audit -- --for-simulation --json                              # each line gets "simulation": "<scenario>"
+```
+
+Each simulation is shown under a header (its scenario, when the simulated day started, when it was
+stored), in its own time zone unless `--tz` says otherwise. The last-24-hours default doesn't apply here
+(simulated time is in 2026); `--since` and `--until` do, in simulated time. `--scenario` only works
+with `--for-simulation`, and `--for-simulation` reads databases, not `.jsonl` files.
+
+Storing into the live database is safe next to the running service: it only writes the simulation
+tables. If the database is from before stored simulations, `--store` upgrades it first (with a copy,
+like the service does at startup).
+
+The same
 scenarios run as automated tests (`src/test/sim/scenarios.test.ts`). They also check that no cycle
 is ever delivered twice, that every watering ends, and that no notification is sent before its event.

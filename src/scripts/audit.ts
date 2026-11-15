@@ -13,50 +13,18 @@
  *   npm run audit -- --json                        raw JSON lines (for jq, spreadsheets, ...)
  *   npm run audit -- --file other.db               another database (default: CONDUCTOR_DB), read-only
  *   npm run audit -- --file trail.audit.jsonl      a JSON Lines trail (simulations, versions before the database)
+ *
+ * Simulations stored with `npm run simulate -- --store` never show up above; ask for them:
+ *   npm run audit -- --for-simulation                              every stored simulation, whole simulated time
+ *   npm run audit -- --for-simulation --scenario bhyve-socket-outage --summary
+ *   npm run audit -- --for-simulation --recovery --json            (each line gets "simulation": <scenario>)
  */
-import { parseArgs } from 'node:util';
-import { filterEvents, formatEvent, formatSummary, parseSince, summarize, type AuditFilter } from '../audit/report.ts';
+import { runAuditCommand } from '../audit/command.ts';
 import { loadConfig } from '../config.ts';
-import { readAuditSource } from '../db/audit-log.ts';
 
-const { values } = parseArgs({
-  options: {
-    since: { type: 'string', default: '24h' },
-    until: { type: 'string' },
-    type: { type: 'string' },
-    device: { type: 'string' },
-    zone: { type: 'string' },
-    sequence: { type: 'string' },
-    recovery: { type: 'boolean', default: false },
-    summary: { type: 'boolean', default: false },
-    json: { type: 'boolean', default: false },
-    file: { type: 'string' },
-    tz: { type: 'string' },
-  },
+process.exitCode = await runAuditCommand(process.argv.slice(2), {
+  out: (text) => console.log(text),
+  err: (text) => console.error(text),
+  now: () => new Date(),
+  defaultDatabase: () => loadConfig(['CONDUCTOR_DB']).CONDUCTOR_DB,
 });
-
-const now = new Date();
-const file = values.file ?? loadConfig(['CONDUCTOR_DB']).CONDUCTOR_DB;
-
-const filter: AuditFilter = {
-  // A sequence id is specific enough on its own; don't hide its early events behind --since.
-  ...(values.sequence ? {} : { since: parseSince(values.since, now) }),
-  ...(values.until ? { until: parseSince(values.until, now) } : {}),
-  ...(values.type ? { types: values.type.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
-  ...(values.device ? { device: values.device } : {}),
-  ...(values.zone ? { zone: values.zone } : {}),
-  ...(values.sequence ? { sequence: values.sequence } : {}),
-  recovery: values.recovery,
-};
-const { events, skipped } = await readAuditSource(file, filter);
-const selected = filterEvents(events, filter);
-
-if (values.json) {
-  for (const e of selected) console.log(JSON.stringify(e));
-} else if (values.summary) {
-  console.log(formatSummary(summarize(selected), values.tz));
-} else {
-  if (selected.length === 0) console.log(`No matching events in ${file}.`);
-  for (const e of selected) console.log(formatEvent(e, values.tz));
-}
-if (skipped > 0) console.error(`(${skipped} unreadable line(s) in ${file} skipped — e.g. a line cut short by a crash)`);

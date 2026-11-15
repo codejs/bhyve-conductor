@@ -50,6 +50,8 @@ export interface Scenario {
 
 export interface SimResult {
   scenario: Scenario;
+  /** When the simulated day started (virtual time). */
+  startedAt: Date;
   events: AuditEvent[];
   notifications: Notification[];
   timeZone: string;
@@ -183,5 +185,5 @@ export const runScenario = async (scenario: Scenario): Promise<SimResult> => {
   };
   const events = await queryAuditEvents(db);
   await db.close();
-  return { scenario, events, notifications, timeZone: SIM_TIME_ZONE, stored };
+  return { scenario, startedAt: start, events, notifications, timeZone: SIM_TIME_ZONE, stored };
 };

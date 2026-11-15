@@ -223,3 +223,106 @@ model SensorReading {
   @@id([sensorId, measuredAt])
   @@map("sensor_reading")
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Simulation results (npm run simulate -- --store). Kept apart from the conductor's own data: nothing
+// here affects watering, and `npm run audit` shows these trails only with --for-simulation.
+// ---------------------------------------------------------------------------------------------------
+
+/// One stored scenario run. Storing a scenario again replaces its previous result.
+model SimulationRun {
+  id        Int      @id @default(autoincrement())
+  /// The scenario id (src/sim/scenarios.ts): one stored result per scenario, the latest.
+  scenario  String
+  title     String
+  /// When the result was stored (real time).
+  storedAt  DateTime @map("stored_at")
+  /// When the simulated day started (virtual time) and how long it ran.
+  startedAt DateTime @map("started_at")
+  hours     Float
+  /// The time zone of the simulated garden, for showing its times.
+  timeZone  String   @map("time_zone")
+
+  events        SimulationEvent[]
+  notifications SimulationNotification[]
+  sequences     SimulationSequence[]
+  watering      SimulationWatering[]
+
+  @@unique([scenario], map: "simulation_run_scenario")
+  @@map("simulation_run")
+}
+
+/// A simulated audit event: the same shape as audit_event.
+model SimulationEvent {
+  id              Int      @id @default(autoincrement())
+  simulationRunId Int      @map("simulation_run_id")
+  ts              DateTime
+  type            String
+  data            Json
+  deviceId        String?  @map("device_id")
+  zoneKey         String?  @map("zone_key")
+  sequenceId      String?  @map("sequence_id")
+
+  run SimulationRun @relation(fields: [simulationRunId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([simulationRunId, id], map: "simulation_event_run")
+  @@map("simulation_event")
+}
+
+/// A Telegram message the simulated conductor would have sent.
+model SimulationNotification {
+  id              Int      @id @default(autoincrement())
+  simulationRunId Int      @map("simulation_run_id")
+  /// 'info' | 'warning' | 'critical'
+  severity        String
+  /// The audit event type it was about.
+  type            String
+  /// Telegram HTML.
+  text            String
+  /// When the event happened, and when the message would have been sent.
+  ts              DateTime
+  sentAt          DateTime @map("sent_at")
+
+  run SimulationRun @relation(fields: [simulationRunId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([simulationRunId, id], map: "simulation_notification_run")
+  @@map("simulation_notification")
+}
+
+/// What each simulated watering sequence planned and delivered (SqliteStore.sequenceResults()).
+model SimulationSequence {
+  simulationRunId      Int       @map("simulation_run_id")
+  sequenceId           String    @map("sequence_id")
+  deviceId             String    @map("device_id")
+  createdAt            DateTime  @map("created_at")
+  status               String
+  endedAt              DateTime? @map("ended_at")
+  abandonReason        String?   @map("abandon_reason")
+  cycles               Int
+  cyclesDelivered      Int       @map("cycles_delivered")
+  plannedMinutes       Float     @map("planned_minutes")
+  deliveredMinutes     Float     @map("delivered_minutes")
+  uncertainStationRuns Int       @map("uncertain_station_runs")
+  failedAttempts       Int       @map("failed_attempts")
+  waterOffAt           DateTime? @map("water_off_at")
+
+  run SimulationRun @relation(fields: [simulationRunId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([simulationRunId, sequenceId])
+  @@map("simulation_sequence")
+}
+
+/// The simulated watering ledger.
+model SimulationWatering {
+  id              Int      @id @default(autoincrement())
+  simulationRunId Int      @map("simulation_run_id")
+  zoneKey         String   @map("zone_key")
+  startedAt       DateTime @map("started_at")
+  minutes         Float
+  sequenceId      String?  @map("sequence_id")
+
+  run SimulationRun @relation(fields: [simulationRunId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([simulationRunId], map: "simulation_watering_run")
+  @@map("simulation_watering")
+}

@@ -146,12 +146,12 @@ with Ctrl+C or SIGTERM; it finishes the current cycle before exiting.
 | `npm run tuya:devices` | List Tuya devices and their data points (`-- --json` for raw output) |
 | `npm run sensors:read` | Read the soil sensors once |
 | `npm run weather:forecast` | Show the forecast and upcoming B-hyve runs the water budget uses |
-| `npm run audit` | Review the audit trail (`audit:summary`, `audit:recovery`; filters such as `-- --since 7d` or `-- --zone <deviceId>:2` are listed at the top of `src/scripts/audit.ts`) |
+| `npm run audit` | Review the audit trail (`audit:summary`, `audit:recovery`; filters such as `-- --since 7d` or `-- --zone <deviceId>:2` are listed at the top of `src/scripts/audit.ts`). Stored simulations only show with `-- --for-simulation [--scenario <id>]` |
 | `npm run notify:test` | Send a test Telegram message |
 | `npm run db:migrate` | Create or upgrade the SQLite database (`CONDUCTOR_DB`, or `-- --file <path>`), converting one of the drizzle-based version; the service does this itself at startup |
 | `npm run db:migration -- <name>` | Write a migration after changing `prisma/schema.prisma` (offline; the same SQL as `prisma migrate dev --create-only`) |
 | `npm run db:generate` / `npm run db:check` | Regenerate the Prisma client / check the migrations produce `prisma/schema.prisma` |
-| `npm run simulate -- --list` | List simulated scenarios (outages, storms, dead batteries, ...); `-- --all` runs them |
+| `npm run simulate -- --list` | List simulated scenarios (outages, storms, dead batteries, ...); `-- --all` runs them; add `--store` to keep the results in the database (`--db <path>` for another one) |
 | `npm test` / `npm run test:watch` / `npm run test:coverage` | Run the tests |
 | `npm run typecheck` | Type-check without building |
 | `npm run archive` | Zip the project, without `node_modules`, `.git` or `.env` |

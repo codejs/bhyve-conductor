@@ -407,7 +407,12 @@ export const ModelName = {
   OpenAlert: 'OpenAlert',
   ZoneState: 'ZoneState',
   AuditEvent: 'AuditEvent',
-  SensorReading: 'SensorReading'
+  SensorReading: 'SensorReading',
+  SimulationRun: 'SimulationRun',
+  SimulationEvent: 'SimulationEvent',
+  SimulationNotification: 'SimulationNotification',
+  SimulationSequence: 'SimulationSequence',
+  SimulationWatering: 'SimulationWatering'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -423,7 +428,7 @@ export type TypeMap<ExtArgs extends runtime.Types.Extensions.InternalArgs = runt
     omit: GlobalOmitOptions
   }
   meta: {
-    modelProps: "serviceRun" | "zone" | "wateringSequence" | "sequenceZone" | "sequenceWave" | "waveStation" | "zoneWatering" | "openAlert" | "zoneState" | "auditEvent" | "sensorReading"
+    modelProps: "serviceRun" | "zone" | "wateringSequence" | "sequenceZone" | "sequenceWave" | "waveStation" | "zoneWatering" | "openAlert" | "zoneState" | "auditEvent" | "sensorReading" | "simulationRun" | "simulationEvent" | "simulationNotification" | "simulationSequence" | "simulationWatering"
     txIsolationLevel: TransactionIsolationLevel
   }
   model: {
@@ -1241,6 +1246,376 @@ export type TypeMap<ExtArgs extends runtime.Types.Extensions.InternalArgs = runt
         }
       }
     }
+    SimulationRun: {
+      payload: Prisma.$SimulationRunPayload<ExtArgs>
+      fields: Prisma.SimulationRunFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.SimulationRunFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.SimulationRunFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>
+        }
+        findFirst: {
+          args: Prisma.SimulationRunFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.SimulationRunFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>
+        }
+        findMany: {
+          args: Prisma.SimulationRunFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>[]
+        }
+        create: {
+          args: Prisma.SimulationRunCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>
+        }
+        createMany: {
+          args: Prisma.SimulationRunCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.SimulationRunCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>[]
+        }
+        delete: {
+          args: Prisma.SimulationRunDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>
+        }
+        update: {
+          args: Prisma.SimulationRunUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>
+        }
+        deleteMany: {
+          args: Prisma.SimulationRunDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.SimulationRunUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.SimulationRunUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>[]
+        }
+        upsert: {
+          args: Prisma.SimulationRunUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationRunPayload>
+        }
+        aggregate: {
+          args: Prisma.SimulationRunAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateSimulationRun>
+        }
+        groupBy: {
+          args: Prisma.SimulationRunGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationRunGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.SimulationRunCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationRunCountAggregateOutputType> | number
+        }
+      }
+    }
+    SimulationEvent: {
+      payload: Prisma.$SimulationEventPayload<ExtArgs>
+      fields: Prisma.SimulationEventFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.SimulationEventFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.SimulationEventFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>
+        }
+        findFirst: {
+          args: Prisma.SimulationEventFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.SimulationEventFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>
+        }
+        findMany: {
+          args: Prisma.SimulationEventFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>[]
+        }
+        create: {
+          args: Prisma.SimulationEventCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>
+        }
+        createMany: {
+          args: Prisma.SimulationEventCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.SimulationEventCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>[]
+        }
+        delete: {
+          args: Prisma.SimulationEventDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>
+        }
+        update: {
+          args: Prisma.SimulationEventUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>
+        }
+        deleteMany: {
+          args: Prisma.SimulationEventDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.SimulationEventUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.SimulationEventUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>[]
+        }
+        upsert: {
+          args: Prisma.SimulationEventUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationEventPayload>
+        }
+        aggregate: {
+          args: Prisma.SimulationEventAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateSimulationEvent>
+        }
+        groupBy: {
+          args: Prisma.SimulationEventGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationEventGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.SimulationEventCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationEventCountAggregateOutputType> | number
+        }
+      }
+    }
+    SimulationNotification: {
+      payload: Prisma.$SimulationNotificationPayload<ExtArgs>
+      fields: Prisma.SimulationNotificationFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.SimulationNotificationFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.SimulationNotificationFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>
+        }
+        findFirst: {
+          args: Prisma.SimulationNotificationFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.SimulationNotificationFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>
+        }
+        findMany: {
+          args: Prisma.SimulationNotificationFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>[]
+        }
+        create: {
+          args: Prisma.SimulationNotificationCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>
+        }
+        createMany: {
+          args: Prisma.SimulationNotificationCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.SimulationNotificationCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>[]
+        }
+        delete: {
+          args: Prisma.SimulationNotificationDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>
+        }
+        update: {
+          args: Prisma.SimulationNotificationUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>
+        }
+        deleteMany: {
+          args: Prisma.SimulationNotificationDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.SimulationNotificationUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.SimulationNotificationUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>[]
+        }
+        upsert: {
+          args: Prisma.SimulationNotificationUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationNotificationPayload>
+        }
+        aggregate: {
+          args: Prisma.SimulationNotificationAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateSimulationNotification>
+        }
+        groupBy: {
+          args: Prisma.SimulationNotificationGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationNotificationGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.SimulationNotificationCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationNotificationCountAggregateOutputType> | number
+        }
+      }
+    }
+    SimulationSequence: {
+      payload: Prisma.$SimulationSequencePayload<ExtArgs>
+      fields: Prisma.SimulationSequenceFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.SimulationSequenceFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.SimulationSequenceFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>
+        }
+        findFirst: {
+          args: Prisma.SimulationSequenceFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.SimulationSequenceFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>
+        }
+        findMany: {
+          args: Prisma.SimulationSequenceFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>[]
+        }
+        create: {
+          args: Prisma.SimulationSequenceCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>
+        }
+        createMany: {
+          args: Prisma.SimulationSequenceCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.SimulationSequenceCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>[]
+        }
+        delete: {
+          args: Prisma.SimulationSequenceDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>
+        }
+        update: {
+          args: Prisma.SimulationSequenceUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>
+        }
+        deleteMany: {
+          args: Prisma.SimulationSequenceDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.SimulationSequenceUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.SimulationSequenceUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>[]
+        }
+        upsert: {
+          args: Prisma.SimulationSequenceUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationSequencePayload>
+        }
+        aggregate: {
+          args: Prisma.SimulationSequenceAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateSimulationSequence>
+        }
+        groupBy: {
+          args: Prisma.SimulationSequenceGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationSequenceGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.SimulationSequenceCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationSequenceCountAggregateOutputType> | number
+        }
+      }
+    }
+    SimulationWatering: {
+      payload: Prisma.$SimulationWateringPayload<ExtArgs>
+      fields: Prisma.SimulationWateringFieldRefs
+      operations: {
+        findUnique: {
+          args: Prisma.SimulationWateringFindUniqueArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload> | null
+        }
+        findUniqueOrThrow: {
+          args: Prisma.SimulationWateringFindUniqueOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>
+        }
+        findFirst: {
+          args: Prisma.SimulationWateringFindFirstArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload> | null
+        }
+        findFirstOrThrow: {
+          args: Prisma.SimulationWateringFindFirstOrThrowArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>
+        }
+        findMany: {
+          args: Prisma.SimulationWateringFindManyArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>[]
+        }
+        create: {
+          args: Prisma.SimulationWateringCreateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>
+        }
+        createMany: {
+          args: Prisma.SimulationWateringCreateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        createManyAndReturn: {
+          args: Prisma.SimulationWateringCreateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>[]
+        }
+        delete: {
+          args: Prisma.SimulationWateringDeleteArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>
+        }
+        update: {
+          args: Prisma.SimulationWateringUpdateArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>
+        }
+        deleteMany: {
+          args: Prisma.SimulationWateringDeleteManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateMany: {
+          args: Prisma.SimulationWateringUpdateManyArgs<ExtArgs>
+          result: BatchPayload
+        }
+        updateManyAndReturn: {
+          args: Prisma.SimulationWateringUpdateManyAndReturnArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>[]
+        }
+        upsert: {
+          args: Prisma.SimulationWateringUpsertArgs<ExtArgs>
+          result: runtime.Types.Utils.PayloadToResult<Prisma.$SimulationWateringPayload>
+        }
+        aggregate: {
+          args: Prisma.SimulationWateringAggregateArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.AggregateSimulationWatering>
+        }
+        groupBy: {
+          args: Prisma.SimulationWateringGroupByArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationWateringGroupByOutputType>[]
+        }
+        count: {
+          args: Prisma.SimulationWateringCountArgs<ExtArgs>
+          result: runtime.Types.Utils.Optional<Prisma.SimulationWateringCountAggregateOutputType> | number
+        }
+      }
+    }
   }
 } & {
   other: {
@@ -1417,6 +1792,78 @@ export const SensorReadingScalarFieldEnum = {
 } as const
 
 export type SensorReadingScalarFieldEnum = (typeof SensorReadingScalarFieldEnum)[keyof typeof SensorReadingScalarFieldEnum]
+
+
+export const SimulationRunScalarFieldEnum = {
+  id: 'id',
+  scenario: 'scenario',
+  title: 'title',
+  storedAt: 'storedAt',
+  startedAt: 'startedAt',
+  hours: 'hours',
+  timeZone: 'timeZone'
+} as const
+
+export type SimulationRunScalarFieldEnum = (typeof SimulationRunScalarFieldEnum)[keyof typeof SimulationRunScalarFieldEnum]
+
+
+export const SimulationEventScalarFieldEnum = {
+  id: 'id',
+  simulationRunId: 'simulationRunId',
+  ts: 'ts',
+  type: 'type',
+  data: 'data',
+  deviceId: 'deviceId',
+  zoneKey: 'zoneKey',
+  sequenceId: 'sequenceId'
+} as const
+
+export type SimulationEventScalarFieldEnum = (typeof SimulationEventScalarFieldEnum)[keyof typeof SimulationEventScalarFieldEnum]
+
+
+export const SimulationNotificationScalarFieldEnum = {
+  id: 'id',
+  simulationRunId: 'simulationRunId',
+  severity: 'severity',
+  type: 'type',
+  text: 'text',
+  ts: 'ts',
+  sentAt: 'sentAt'
+} as const
+
+export type SimulationNotificationScalarFieldEnum = (typeof SimulationNotificationScalarFieldEnum)[keyof typeof SimulationNotificationScalarFieldEnum]
+
+
+export const SimulationSequenceScalarFieldEnum = {
+  simulationRunId: 'simulationRunId',
+  sequenceId: 'sequenceId',
+  deviceId: 'deviceId',
+  createdAt: 'createdAt',
+  status: 'status',
+  endedAt: 'endedAt',
+  abandonReason: 'abandonReason',
+  cycles: 'cycles',
+  cyclesDelivered: 'cyclesDelivered',
+  plannedMinutes: 'plannedMinutes',
+  deliveredMinutes: 'deliveredMinutes',
+  uncertainStationRuns: 'uncertainStationRuns',
+  failedAttempts: 'failedAttempts',
+  waterOffAt: 'waterOffAt'
+} as const
+
+export type SimulationSequenceScalarFieldEnum = (typeof SimulationSequenceScalarFieldEnum)[keyof typeof SimulationSequenceScalarFieldEnum]
+
+
+export const SimulationWateringScalarFieldEnum = {
+  id: 'id',
+  simulationRunId: 'simulationRunId',
+  zoneKey: 'zoneKey',
+  startedAt: 'startedAt',
+  minutes: 'minutes',
+  sequenceId: 'sequenceId'
+} as const
+
+export type SimulationWateringScalarFieldEnum = (typeof SimulationWateringScalarFieldEnum)[keyof typeof SimulationWateringScalarFieldEnum]
 
 
 export const SortOrder = {
@@ -1683,6 +2130,11 @@ export type GlobalOmitConfig = {
   zoneState?: Prisma.ZoneStateOmit
   auditEvent?: Prisma.AuditEventOmit
   sensorReading?: Prisma.SensorReadingOmit
+  simulationRun?: Prisma.SimulationRunOmit
+  simulationEvent?: Prisma.SimulationEventOmit
+  simulationNotification?: Prisma.SimulationNotificationOmit
+  simulationSequence?: Prisma.SimulationSequenceOmit
+  simulationWatering?: Prisma.SimulationWateringOmit
 }
 
 /* Types for Logging */

@@ -27,7 +27,7 @@ beforeAll(async () => {
   for (const level of ['debug', 'info', 'warn', 'error'] as const) vi.spyOn(log, level).mockImplementation(() => {});
   for (const s of SCENARIOS) results.set(s.id, await runScenario(s));
   vi.restoreAllMocks();
-});
+}, 120_000); // every scenario, end to end: seconds alone, longer next to the other test files
 
 beforeEach(() => {
   vi.spyOn(log, 'error').mockImplementation(() => {});

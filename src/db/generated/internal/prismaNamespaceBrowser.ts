@@ -61,7 +61,12 @@ export const ModelName = {
   OpenAlert: 'OpenAlert',
   ZoneState: 'ZoneState',
   AuditEvent: 'AuditEvent',
-  SensorReading: 'SensorReading'
+  SensorReading: 'SensorReading',
+  SimulationRun: 'SimulationRun',
+  SimulationEvent: 'SimulationEvent',
+  SimulationNotification: 'SimulationNotification',
+  SimulationSequence: 'SimulationSequence',
+  SimulationWatering: 'SimulationWatering'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -217,6 +222,78 @@ export const SensorReadingScalarFieldEnum = {
 } as const
 
 export type SensorReadingScalarFieldEnum = (typeof SensorReadingScalarFieldEnum)[keyof typeof SensorReadingScalarFieldEnum]
+
+
+export const SimulationRunScalarFieldEnum = {
+  id: 'id',
+  scenario: 'scenario',
+  title: 'title',
+  storedAt: 'storedAt',
+  startedAt: 'startedAt',
+  hours: 'hours',
+  timeZone: 'timeZone'
+} as const
+
+export type SimulationRunScalarFieldEnum = (typeof SimulationRunScalarFieldEnum)[keyof typeof SimulationRunScalarFieldEnum]
+
+
+export const SimulationEventScalarFieldEnum = {
+  id: 'id',
+  simulationRunId: 'simulationRunId',
+  ts: 'ts',
+  type: 'type',
+  data: 'data',
+  deviceId: 'deviceId',
+  zoneKey: 'zoneKey',
+  sequenceId: 'sequenceId'
+} as const
+
+export type SimulationEventScalarFieldEnum = (typeof SimulationEventScalarFieldEnum)[keyof typeof SimulationEventScalarFieldEnum]
+
+
+export const SimulationNotificationScalarFieldEnum = {
+  id: 'id',
+  simulationRunId: 'simulationRunId',
+  severity: 'severity',
+  type: 'type',
+  text: 'text',
+  ts: 'ts',
+  sentAt: 'sentAt'
+} as const
+
+export type SimulationNotificationScalarFieldEnum = (typeof SimulationNotificationScalarFieldEnum)[keyof typeof SimulationNotificationScalarFieldEnum]
+
+
+export const SimulationSequenceScalarFieldEnum = {
+  simulationRunId: 'simulationRunId',
+  sequenceId: 'sequenceId',
+  deviceId: 'deviceId',
+  createdAt: 'createdAt',
+  status: 'status',
+  endedAt: 'endedAt',
+  abandonReason: 'abandonReason',
+  cycles: 'cycles',
+  cyclesDelivered: 'cyclesDelivered',
+  plannedMinutes: 'plannedMinutes',
+  deliveredMinutes: 'deliveredMinutes',
+  uncertainStationRuns: 'uncertainStationRuns',
+  failedAttempts: 'failedAttempts',
+  waterOffAt: 'waterOffAt'
+} as const
+
+export type SimulationSequenceScalarFieldEnum = (typeof SimulationSequenceScalarFieldEnum)[keyof typeof SimulationSequenceScalarFieldEnum]
+
+
+export const SimulationWateringScalarFieldEnum = {
+  id: 'id',
+  simulationRunId: 'simulationRunId',
+  zoneKey: 'zoneKey',
+  startedAt: 'startedAt',
+  minutes: 'minutes',
+  sequenceId: 'sequenceId'
+} as const
+
+export type SimulationWateringScalarFieldEnum = (typeof SimulationWateringScalarFieldEnum)[keyof typeof SimulationWateringScalarFieldEnum]
 
 
 export const SortOrder = {
