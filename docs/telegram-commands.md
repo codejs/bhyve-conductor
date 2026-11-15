@@ -122,7 +122,9 @@ These apply to every change (`/pause`, `/resume`, `/config`):
 | nothing for 2 minutes | dropped, nothing changes | dropped, nothing changes |
 
 - A wrong passphrase ends the command; send it again to retry. **3 wrong passphrases within 15
-  minutes lock `/pause` and `/resume` for 15 minutes** (read-only commands keep working).
+  minutes lock all changes (`/pause`, `/resume`, `/config`) for 15 minutes**, then 30, 60… (doubling each
+  time, up to 24 hours) until the right passphrase is given. While locked, not even the right
+  passphrase is accepted. Read-only commands keep working.
 - Answering "yes" after a question has expired tells you it expired; nothing happens.
 - Read-only commands (`/status`, …) can be used while a question is waiting; it keeps waiting.
   Starting another change replaces yours.
@@ -132,11 +134,25 @@ These apply to every change (`/pause`, `/resume`, `/config`):
 
 ### The passphrase in the chat
 
-The bot deletes every message that contains the passphrase: your answer, and also one sent
-by mistake (too early, with the command, after the question expired, or by someone else). It tells
-you when it did. In a private chat that always works. **In a group the bot needs to be an admin with
-the "Delete messages" right**, otherwise it asks you to delete the message yourself. The passphrase is
-never logged, audited or repeated back.
+The bot never checks whether a message *contains* the passphrase. If it did, deleting those messages
+would tell someone guessing it when they got it right: they could send thousands of guesses and watch
+which message disappears, never hitting the lockout. Only an answer to the passphrase question is
+ever compared with it.
+
+Instead, wherever the passphrase could turn up by mistake, anything that *could* be it (8 characters
+or more, and not an answer word like "yes") is deleted, right or wrong, so deleting reveals nothing:
+
+- your answer to the passphrase question;
+- a long answer to an earlier question of a change that fits none of the choices (sent too early?);
+- text after a change's command, e.g. `/pause <passphrase>` (the command isn't run);
+- your next message after a wrong passphrase, or after the passphrase question expired;
+- an old answer to the passphrase question (arriving after a restart, say).
+
+The bot tells you each time. A passphrase typed anywhere else (in ordinary chat, say) is left
+alone: delete it yourself, and change the passphrase if others could have seen it. In a private
+chat, deleting always works. **In a group the bot needs to be an admin with the "Delete messages"
+right**, otherwise it asks you to delete the message yourself. The passphrase is never logged,
+audited or repeated back, and the bot doesn't echo what you type in its replies.
 
 The passphrase is a second factor on top of the allowlist. It protects against someone who gets
 hold of an allowed person's unlocked phone or Telegram session, or is added to the group. Use one
@@ -238,20 +254,28 @@ Commands make the conductor act on incoming messages, so they are off by default
 - **No stale or replayed commands.** Messages older than 2 minutes are ignored, for example ones sent
   while the conductor was down. Each message is handled at most once.
 - **Changes need the passphrase.** `/pause`, `/resume` and `/config` always end with the passphrase,
-  may ask to confirm first, drop out on no answer or too many unexpected answers, and lock after
-  repeated wrong passphrases (see [Pausing and resuming](#pausing-and-resuming)). An answer that can't
-  be the passphrase (an answer word, or shorter than 8 characters, like a value meant for the previous
-  question) is asked again instead of counting as a wrong passphrase.
+  may ask to confirm first, drop out on no answer or too many unexpected answers, and lock, for longer
+  each time, after repeated wrong passphrases (see [Pausing and resuming](#pausing-and-resuming)). An
+  answer that can't be the passphrase (an answer word, or shorter than 8 characters, like a value meant
+  for the previous question) is asked again instead of counting as a wrong passphrase. The passphrase
+  is kept in memory only as a digest, and removed from the environment once read.
+- **No guessing oracle.** The passphrase is compared only with answers to the passphrase question;
+  nothing the bot does with any other message depends on it (see
+  [The passphrase in the chat](#the-passphrase-in-the-chat)).
 - **Settings are checked like the config file.** `/config` accepts only the seven settings above, as
   plain numbers in their allowed ranges. The whole file is validated before anything is written, and
-  nothing is written if it was edited by hand since startup.
+  nothing is written if it was edited by hand since startup, or while the change was being saved.
+  New files (`conductor.json`, its `.bak`, the state file) are written to a fresh, randomly named
+  temporary file that must not already exist, then renamed into place, so a file or symlink planted in
+  the folder is never written through.
 - **Exact commands only.** Text must be exactly one of the commands above. Arguments are refused, not
   ignored, and `/command@OtherBot` is left to that bot. Anything the APIs return (device and sensor
   names, errors) is escaped before it is shown.
-- **Limits.** At most 10 commands a minute; beyond that you get one "too many commands" notice. The
+- **Limits.** At most 10 commands and 30 answers a minute; beyond that you get one notice. The
   commands that call cloud APIs (`/sensors_read`, `/bhyve_devices`) run at most once every 30
   seconds. This protects your Tuya API quota and the B-hyve account the watering depends on. Each
-  command times out after 45 s, and they run one at a time.
+  command times out after 45 s, and they run one at a time. `/audit` works out each view once, so
+  paging costs next to nothing (the bot shares its process with the watering).
 - **Watering comes first.** The command bot runs beside the monitor and can't block or break it.
   Failures are reported in the chat and logged. A rejected or revoked bot token (401) turns commands
   off until the next restart instead of retrying forever. `/sensors_read` uses its own sensor reader,
@@ -279,4 +303,29 @@ leaks, revoke it with @BotFather (`/revoke`) and update `.env`.
 | `/audit`: "only its newest part was read" | The audit file is large; use `npm run audit` on the machine for older events. |
 | The right passphrase is "wrong" | Check the `.env` line is quoted: an unquoted `#` cuts the value short. |
 | In a group, answers are ignored | Answer using Telegram's *Reply* on the bot's question (the reply box opens by itself), and from the same account that sent the command. |
-| `🔒 Changes are locked …` | Too many wrong passphrases; wait, or restart the conductor to clear the lock. |
+| `🔒 Changes are locked …` | Too many wrong passphrases; wait (the lock doubles each time: 15, 30, 60 min…), or restart the conductor to clear it. |
+| `🐢 Too many answers` | More than 30 answers a minute; the bot ignores the rest for a minute. |
+
+## Adding a command (for developers)
+
+Every command is one of three kinds (`src/bot/conversation.ts`). Register new ones in
+`src/bot/registry.ts`; the bot (`src/bot/bot.ts`) does the rest: authorization, rate limits, timeouts,
+conversations, the passphrase and the audit trail.
+
+| Kind | For | Write |
+|---|---|---|
+| `query` | one read-only reply (`/status`) | `run()` returning the reply; a `cooldownSeconds` if it calls a cloud API |
+| `interactive` | read-only, over several messages (`/audit`) | `begin()` returning steps |
+| `mutable` | anything that changes something (`/pause`, `/config`) | `begin()` returning steps that end with `passphraseStep` |
+
+Steps come from the builders: `done`, `ask` (a few answer words), `confirm` (yes/cancel), an `input`
+step with your own `read` (free-form answers), and `passphraseStep`. The rules the bot relies on:
+
+- `begin` and `read` only read. The only place a change may happen is a passphrase step's `run`. (The bot
+  refuses a passphrase step from a read-only command.)
+- Never repeat what the user typed in a reply: it could be the passphrase, sent too early.
+- Escape everything that doesn't come from the code: `safe()`, `where()`, `fitLines()` in `format.ts`.
+- Never compare anything with the passphrase: that's the gate's job (`src/bot/gate.ts`), at the
+  passphrase question only.
+- Give the command only what it needs (e.g. `Pick<BhyveClient, 'getDevices'>`, a `ConductorControl`
+  with three functions), so it can't do more even by mistake.

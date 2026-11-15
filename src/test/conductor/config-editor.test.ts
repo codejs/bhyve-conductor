@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -268,7 +268,7 @@ describe('ConfigEditor', () => {
 
     it('leaves the conductor as it was when the file cannot be written', async () => {
       const t = await setup();
-      await mkdir(`${path}.tmp`); // writing the temporary file fails
+      await mkdir(`${path}.bak`); // keeping the backup fails (a folder is in the way)
 
       const result = await t.editor.apply('dev1:1', { runMinutes: 12 }, 'x');
 
@@ -276,6 +276,21 @@ describe('ConfigEditor', () => {
       expect(await readFile(path, 'utf8')).toBe(t.text);
       expect(t.config.zones[0]?.runMinutes).toBe(10);
       expect(t.audit.events).toEqual([]);
+      expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([]); // no temporary file left
+    });
+
+    it('never follows a symlink planted next to the config (it would overwrite another file)', async () => {
+      const t = await setup();
+      const victim = join(dir, 'victim.txt');
+      await writeFile(victim, 'IMPORTANT');
+      await symlink(victim, `${path}.bak`);
+
+      const result = await t.editor.apply('dev1:1', { runMinutes: 12 }, 'x');
+
+      expect(result).toMatchObject({ ok: true });
+      expect(await readFile(victim, 'utf8')).toBe('IMPORTANT');
+      expect((await lstat(`${path}.bak`)).isSymbolicLink()).toBe(false); // the link itself was replaced
+      expect(await readFile(`${path}.bak`, 'utf8')).toBe(t.text);
     });
 
     it('makes one change at a time, each on top of the previous one', async () => {
@@ -295,9 +310,9 @@ describe('ConfigEditor', () => {
 
     it('carries on after a failed change', async () => {
       const t = await setup();
-      await mkdir(`${path}.tmp`);
+      await mkdir(`${path}.bak`);
       await t.editor.apply('dev1:1', { runMinutes: 12 }, 'x');
-      await rm(`${path}.tmp`, { recursive: true });
+      await rm(`${path}.bak`, { recursive: true });
 
       expect(await t.editor.apply('dev1:1', { runMinutes: 13 }, 'x')).toMatchObject({ ok: true });
     });

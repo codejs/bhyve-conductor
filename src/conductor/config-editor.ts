@@ -1,5 +1,6 @@
-import { readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { errorMessage, type AuditSink } from '../audit/audit.ts';
+import { writeFileAtomic } from '../files.ts';
 import { log } from '../log.ts';
 import {
   EDITABLE_ZONE_RULES,
@@ -22,7 +23,9 @@ import {
  *      and the whole file is validated exactly as at startup, including the rules between settings
  *      (target above threshold...) and the values that follow from others (e.g. criticalLowPct);
  *   3. the previous file is kept as conductor.json.bak, the new one is written to a temporary file with
- *      the same permissions and renamed over the old one, so a crash never leaves half a file;
+ *      the same permissions and renamed over the old one, so a crash never leaves half a file (see
+ *      writeFileAtomic: nothing planted in the folder is followed); if the file changed meanwhile, it is
+ *      left alone;
  *   4. only then does the running conductor switch to the new settings (at its next poll). Watering
  *      already under way keeps the plan it started with.
  */
@@ -101,11 +104,18 @@ export class ConfigEditor {
     const { path, config, audit } = this.#deps;
     try {
       const mode = (await stat(path)).mode & 0o777;
-      await writeFile(`${path}.bak`, prepared.original, { encoding: 'utf8', mode });
-      const tmp = `${path}.tmp`;
-      await writeFile(tmp, `${JSON.stringify(prepared.raw, null, 2)}\n`, { encoding: 'utf8', mode });
-      await rename(tmp, path);
+      await writeFileAtomic(`${path}.bak`, prepared.original, { mode });
+      await writeFileAtomic(path, `${JSON.stringify(prepared.raw, null, 2)}\n`, {
+        mode,
+        // Someone may have edited the file while this change was being prepared: don't overwrite that.
+        beforeReplace: async () => {
+          if ((await readFile(path, 'utf8')) !== prepared.original) throw new FileChangedError();
+        },
+      });
     } catch (err) {
+      if (err instanceof FileChangedError) {
+        return { ok: false, reason: 'conflict', problems: [`${path} was changed while saving; nothing was changed, try again`] };
+      }
       log.error(`Could not save ${path}`, err);
       return { ok: false, reason: 'unavailable', problems: [`could not save ${path}: ${errorMessage(err)}`] };
     }
@@ -184,6 +194,8 @@ export class ConfigEditor {
     return { ok: true, zone: { key, name: live.name }, changes: list, raw, original, zoneAfter };
   }
 }
+
+class FileChangedError extends Error {}
 
 const pick = (z: ZoneConfig): Record<EditableZoneRule, number> =>
   Object.fromEntries(EDITABLE_ZONE_RULES.map((k) => [k, z[k]])) as Record<EditableZoneRule, number>;

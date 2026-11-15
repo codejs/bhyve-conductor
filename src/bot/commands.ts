@@ -1,28 +1,16 @@
 import type { BhyveClient } from '../bhyve/client.ts';
 import type { ConductorStatus } from '../conductor/monitor.ts';
 import type { MoistureSource } from '../sensors/types.ts';
+import type { QueryCommand } from './conversation.ts';
 import { formatDevices, formatReadings, formatStatus } from './format.ts';
 
 /**
- * The read-only commands the Telegram bot answers: nothing here can start or stop watering or change
+ * The read-only queries the Telegram bot answers: nothing here can start or stop watering or change
  * a controller. That is enforced by the types below (the B-hyve client is narrowed to `getDevices`),
  * not just by convention. /audit (audit-command.ts) is read-only too, over several messages. Commands
  * that change something (/pause, /resume in control.ts; /config in config-command.ts) always go through
  * a conversation ending in the passphrase (conversation.ts, bot.ts); none of them talks to B-hyve.
  */
-
-export interface BotCommand {
-  /** Telegram command name: lowercase letters, digits and underscores, at most 32. */
-  name: string;
-  /** Shown in /help and in the Telegram command menu. */
-  description: string;
-  /** The npm script it mirrors, if any. */
-  script?: string;
-  /** Minimum time between two runs; it protects API quotas and the B-hyve account the conductor relies on. */
-  cooldownSeconds: number;
-  /** Produces the reply (Telegram HTML). May throw; the bot reports the error. */
-  run(): Promise<string>;
-}
 
 export interface CommandDeps {
   /** Read-only on purpose: only device listing is reachable from a chat. */
@@ -38,18 +26,18 @@ export interface CommandDeps {
   now?: () => Date;
 }
 
-export const COMMAND_NAME = /^[a-z0-9_]{1,32}$/;
-
-export const buildCommands = (deps: CommandDeps): BotCommand[] => {
+export const buildCommands = (deps: CommandDeps): QueryCommand[] => {
   const now = deps.now ?? (() => new Date());
-  const commands: BotCommand[] = [
+  return [
     {
+      kind: 'query',
       name: 'status',
       description: 'What the conductor is doing: polls, zones, watering, connections, alerts',
       cooldownSeconds: 0,
       run: async () => formatStatus(deps.status(), deps.timeZone),
     },
     {
+      kind: 'query',
       name: 'sensors_read',
       script: 'sensors:read',
       description: 'Read the soil sensors now',
@@ -60,6 +48,7 @@ export const buildCommands = (deps: CommandDeps): BotCommand[] => {
       },
     },
     {
+      kind: 'query',
       name: 'bhyve_devices',
       script: 'bhyve:devices',
       description: 'B-hyve controllers: connection, battery, mode, rain delay, zones',
@@ -67,8 +56,6 @@ export const buildCommands = (deps: CommandDeps): BotCommand[] => {
       run: async () => formatDevices(await deps.bhyve.getDevices()),
     },
   ];
-  for (const c of commands) if (!COMMAND_NAME.test(c.name)) throw new Error(`invalid command name ${c.name}`);
-  return commands;
 };
 
 /** Sensor id → names of the zones it's in. */

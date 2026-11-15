@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildCommands, COMMAND_NAME, zonesBySensor, type CommandDeps } from '../../bot/commands.ts';
+import { buildCommands, zonesBySensor, type CommandDeps } from '../../bot/commands.ts';
+import { COMMAND_NAME } from '../../bot/conversation.ts';
 import type { ConductorStatus } from '../../conductor/monitor.ts';
 import { bhyveDevice, NOW, reading } from '../utils/conductor.ts';
 import { fakeBhyve } from '../utils/fake-bhyve.ts';
@@ -52,7 +53,10 @@ describe('buildCommands', () => {
       ['sensors_read', 'sensors:read'],
       ['bhyve_devices', 'bhyve:devices'],
     ]);
-    for (const c of t.commands) expect(c.name).toMatch(COMMAND_NAME);
+    for (const c of t.commands) {
+      expect(c.name).toMatch(COMMAND_NAME);
+      expect(c.kind).toBe('query');
+    }
   });
 
   it('puts a cooldown on the commands that call cloud APIs, none on /status', () => {

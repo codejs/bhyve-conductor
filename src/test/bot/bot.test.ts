@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot, parseCommand, SlidingWindowLimiter, type CommandBotOptions } from '../../bot/bot.ts';
-import type { BotCommand } from '../../bot/commands.ts';
+import type { QueryCommand as BotCommand } from '../../bot/conversation.ts';
 import { VirtualClock } from '../../clock.ts';
 import { log } from '../../log.ts';
 import { TelegramConflictError, TelegramPermanentError, TelegramRateLimitError, type TelegramMessage, type TelegramUpdate } from '../../notify/telegram.ts';
@@ -16,6 +16,7 @@ const GROUP: CommandPolicy = { chatId: GROUP_ID, userIds: new Set([OWNER.id, FAM
 const inGroup = (from = OWNER): Partial<TelegramMessage> => ({ chat: { id: GROUP_ID, type: 'supergroup' }, from });
 
 const command = (name: string, cooldownSeconds = 0, reply = `<b>${name}</b> ok`): BotCommand & { run: ReturnType<typeof vi.fn> } => ({
+  kind: 'query',
   name,
   description: `Does ${name}`,
   cooldownSeconds,
@@ -247,6 +248,7 @@ describe('CommandBot', () => {
 
     it('handles a command that throws synchronously', async () => {
       const bad: BotCommand = {
+        kind: 'query',
         name: 'status',
         description: 'x',
         cooldownSeconds: 0,

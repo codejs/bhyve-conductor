@@ -12,18 +12,20 @@ import {
   type TelegramUser,
 } from '../notify/telegram.ts';
 import { authorize, type CommandPolicy, type RejectReason } from './auth.ts';
-import type { BotCommand } from './commands.ts';
 import {
+  actorName,
   ANSWER_WORDS,
   CANCEL_WORDS,
-  MIN_PASSPHRASE_LENGTH,
+  COMMAND_NAME,
   normalizeAnswer,
-  Passphrase,
   type Actor,
+  type BotCommand,
   type ConversationCommand,
+  type QueryCommand,
   type Step,
 } from './conversation.ts';
 import { clip, duration, safe } from './format.ts';
+import { classifyAttempt, PassphraseGate, type GateResult } from './gate.ts';
 
 /**
  * Answers commands sent to the Telegram bot, using long polling (getUpdates): the conductor only makes
@@ -33,21 +35,26 @@ import { clip, duration, safe } from './format.ts';
  *   1. authorization (auth.ts): the configured chat, an allowed user, no forwards/bots/anonymous senders.
  *      Rejected commands get no reply (the bot doesn't reveal anything to strangers); they are audited,
  *      throttled. Other messages from strangers are ignored silently;
- *   2. a message containing the passphrase is deleted from the chat, whatever else happens to it;
- *   3. freshness: messages older than `maxMessageAgeSeconds` (e.g. queued while the conductor was down,
+ *   2. freshness: messages older than `maxMessageAgeSeconds` (e.g. queued while the conductor was down,
  *      or replayed after a restart) are dropped;
- *   4. text that isn't a command is only an answer in a conversation (see below), otherwise ignored;
- *   5. commands: a global rate limit, then a per-command cooldown; each runs with a timeout, one at a time.
+ *   3. text that isn't a command is only an answer in a conversation, otherwise ignored;
+ *   4. commands: a global rate limit, then a per-command cooldown; each runs with a timeout, one at a time.
  *
- * Commands that change something (/pause, /resume; see conversation.ts and control.ts) are conversations
- * with one person: the bot asks, and only the right passphrase as the last answer runs the change.
- *   - "cancel" (or /cancel) ends it at any step; a wrong passphrase ends it too.
- *   - An answer that doesn't fit is asked again, up to `maxInvalidAnswers` times, then the command is dropped.
- *   - No answer within `conversationTimeoutMs` drops it. Nothing changes unless the passphrase step completes.
- *   - One conversation at a time. Read-only commands still work meanwhile; the same person starting another
- *     change replaces theirs; someone else has to wait.
- *   - `maxPassphraseFailures` wrong passphrases within `passphraseFailureWindowMs` lock all changes for `lockoutMs`.
- *   - Passphrase answers are deleted from the chat (best effort) and never logged or audited.
+ * Conversations (see conversation.ts) are with one person at a time:
+ *   - "cancel" (or /cancel) ends one at any step; so does a wrong passphrase;
+ *   - an answer that doesn't fit is asked again, up to `maxInvalidAnswers` times; answers are rate-limited;
+ *   - no answer within `conversationTimeoutMs` ends it. A change happens only after the passphrase step;
+ *   - read-only commands still work meanwhile. The same person starting another conversation replaces
+ *     theirs; someone else waits for a change in progress, but read-only browsing gives way to them;
+ *   - wrong passphrases lock changes, for longer each time (gate.ts).
+ *
+ * The passphrase is never compared with anything but an answer to the passphrase question: whether the
+ * bot deletes a message must not depend on it, or deleting would tell a guesser when they were right
+ * (a guessing oracle with no lockout). Instead, everything that could be the passphrase (classifyAttempt)
+ * is deleted wherever the passphrase could turn up by mistake: answers to the passphrase question, right
+ * or wrong; an answer to an earlier question of a change; text after a change's command; the next message
+ * after a wrong passphrase or after the passphrase question expired (people retype it); an old answer to
+ * the passphrase question.
  *
  * Read-only replies go through the notification queue; conversation messages are sent directly (they ask
  * for a reply), falling back to the queue if that fails.
@@ -73,6 +80,8 @@ export interface CommandBotOptions {
   commandTimeoutMs: number;
   /** At most this many commands per `rateWindowMs`; the rest are ignored. */
   maxCommandsPerWindow: number;
+  /** At most this many answers (in conversations) per `rateWindowMs`; the rest are ignored. */
+  maxAnswersPerWindow: number;
   rateWindowMs: number;
   /** Waits after consecutive getUpdates failures (the last one repeats). */
   retryDelaysMs: number[];
@@ -94,9 +103,11 @@ export interface CommandBotOptions {
   /** Wrong passphrases within `passphraseFailureWindowMs` that lock changes... */
   maxPassphraseFailures: number;
   passphraseFailureWindowMs: number;
-  /** ...for this long. */
+  /** ...for this long the first time, twice as long each time after... */
   lockoutMs: number;
-  /** After a question expires, a late "yes"/"cancel" within this long gets told it came too late. */
+  /** ...up to this. */
+  maxLockoutMs: number;
+  /** After a question expires, a late answer within this long gets told it came too late. */
   lateAnswerMs: number;
 }
 
@@ -105,6 +116,7 @@ export const DEFAULT_BOT_OPTIONS: CommandBotOptions = {
   maxMessageAgeSeconds: 120,
   commandTimeoutMs: 45_000,
   maxCommandsPerWindow: 10,
+  maxAnswersPerWindow: 30,
   rateWindowMs: 60_000,
   retryDelaysMs: [1_000, 5_000, 15_000, 60_000],
   conflictDelayMs: 60_000,
@@ -116,13 +128,14 @@ export const DEFAULT_BOT_OPTIONS: CommandBotOptions = {
   maxPassphraseFailures: 3,
   passphraseFailureWindowMs: 15 * 60_000,
   lockoutMs: 15 * 60_000,
+  maxLockoutMs: 24 * 3_600_000,
   lateAnswerMs: 10 * 60_000,
 };
 
 export interface CommandBotDeps {
   api: BotApi;
   policy: CommandPolicy;
-  commands: readonly (BotCommand | ConversationCommand)[];
+  commands: readonly BotCommand[];
   /** Required if any command is mutable (changes something). */
   passphrase?: string | undefined;
   /** Sends a reply (Telegram HTML) to the configured chat. Must not throw or block (e.g. DeliveryQueue.enqueue). */
@@ -179,31 +192,24 @@ const SUSPICIOUS: ReadonlySet<RejectReason> = new Set(['other-chat', 'user-not-a
 
 const noAudit: AuditSink = { record: () => {} };
 
-/** Told after deleting a message that contained the passphrase (outside the passphrase question)... */
-const LEAK_DELETED = '🔐 I deleted your message because it contained the passphrase.';
-/** ...or after failing to. */
-const LEAK_NOT_DELETED =
-  "⚠️ Your message contains the passphrase and I couldn't delete it (in a group I need the “Delete messages” admin right): please delete it yourself.";
-/** After failing to delete an answer to the passphrase question. */
-const ANSWER_NOT_DELETED =
-  "⚠️ I couldn't delete your passphrase message (in a group I need the “Delete messages” admin right): please delete it yourself.";
+const CANNOT_DELETE = "(in a group I need the “Delete messages” admin right): please delete it yourself";
+/** After deleting (or failing to delete) something that could have been the passphrase. */
+const deletedNote = (deleted: boolean): string =>
+  deleted ? 'I deleted your message in case it was the passphrase.' : `⚠️ I couldn't delete your message ${CANNOT_DELETE}, in case it was the passphrase.`;
 
 type Outcome = 'ok' | 'failed' | 'timed_out' | 'stopped';
 type Guarded<T> = { ok: true; value: T } | { ok: false; outcome: Exclude<Outcome, 'ok'>; error?: string };
 
-/** How a conversation ended, for the audit trail. */
-type ConversationOutcome =
-  | 'ok'
+/** How a command or conversation ended, for the audit trail. */
+type HandledOutcome =
+  | Outcome
   | 'nothing-to-do'
   | 'cancelled'
   | 'expired'
   | 'denied'
   | 'aborted'
   | 'superseded'
-  | 'locked'
-  | 'failed'
-  | 'timed_out'
-  | 'stopped';
+  | 'locked';
 
 interface Conversation {
   command: ConversationCommand;
@@ -211,7 +217,7 @@ interface Conversation {
   startedMs: number;
   /** The step waiting for an answer (unset until the first one is asked). */
   step?: Exclude<Step, { kind: 'done' }>;
-  /** Answers that fit no choice, at this step. */
+  /** Answers that fit nothing, at this step. */
   invalid: number;
   /** What was chosen along the way, for the audit trail. */
   choice?: string;
@@ -223,16 +229,16 @@ export class CommandBot {
   readonly #opts: CommandBotOptions;
   readonly #clock: Clock;
   readonly #audit: AuditSink;
-  readonly #commands: ReadonlyMap<string, BotCommand>;
-  /** Commands that are conversations (mutable or interactive). */
-  readonly #conversational: ReadonlyMap<string, ConversationCommand>;
-  readonly #passphrase: Passphrase | undefined;
+  readonly #registry: ReadonlyMap<string, BotCommand>;
+  readonly #gate: PassphraseGate | undefined;
   readonly #limiter: SlidingWindowLimiter;
+  readonly #answerLimiter: SlidingWindowLimiter;
   readonly #lastRun = new Map<string, number>();
   /** Rejection audit throttle: sender key → last audited; reset every interval. */
   #rejections = new Map<string, number>();
   #rejectionWindowStart = 0;
-  #rateLimitNoticeAt: number | undefined;
+  /** When "too many commands/answers" was last said, per kind (said once per window). */
+  readonly #limitNoticeAt = new Map<'commands' | 'answers', number>();
   #username: string | undefined;
   #offset: number | undefined;
   #loop: Promise<void> | undefined;
@@ -241,33 +247,37 @@ export class CommandBot {
   #wake: (() => void) | undefined;
   #stopWaiters: (() => void)[] = [];
   #conversation: Conversation | undefined;
-  /** Times of recent wrong passphrases. */
-  #failures: number[] = [];
-  #lockedUntil = 0;
-  /** The last conversation that expired, to explain a late answer. */
-  #lastExpired: { userId: number; command: string; atMs: number } | undefined;
+  /** The last conversation that ended, to explain a late answer (and delete a passphrase sent after it). */
+  #lastEnded: { userId: number; command: string; atMs: number; atPassphrase: boolean; expired: boolean } | undefined;
 
   constructor(deps: CommandBotDeps) {
     this.#deps = deps;
     this.#opts = { ...DEFAULT_BOT_OPTIONS, ...deps.options };
     this.#clock = deps.clock ?? systemClock;
     this.#audit = deps.audit ?? noAudit;
-    const readOnly = new Map<string, BotCommand>();
-    const conversational = new Map<string, ConversationCommand>();
+    const registry = new Map<string, BotCommand>();
     for (const c of deps.commands) {
-      if (BUILT_IN.has(c.name) || readOnly.has(c.name) || conversational.has(c.name)) throw new Error(`duplicate bot command /${c.name}`);
-      if (isConversation(c)) conversational.set(c.name, c);
-      else readOnly.set(c.name, c);
+      if (BUILT_IN.has(c.name) || registry.has(c.name)) throw new Error(`duplicate bot command /${c.name}`);
+      if (!COMMAND_NAME.test(c.name)) throw new Error(`invalid bot command name /${c.name}`);
+      registry.set(c.name, c);
     }
-    this.#commands = readOnly;
-    this.#conversational = conversational;
-    const mutable = [...conversational.values()].filter((c) => c.kind === 'mutable');
+    this.#registry = registry;
+    const mutable = [...registry.values()].filter((c) => c.kind === 'mutable');
     if (mutable.length > 0 && deps.passphrase === undefined) {
       // Fail closed: a command that changes something must never run without the passphrase check.
       throw new Error(`/${mutable.map((c) => c.name).join(', /')} need a passphrase (TELEGRAM_COMMAND_PASSPHRASE)`);
     }
-    this.#passphrase = deps.passphrase === undefined ? undefined : new Passphrase(deps.passphrase);
+    this.#gate =
+      deps.passphrase === undefined
+        ? undefined
+        : new PassphraseGate(deps.passphrase, {
+            maxFailures: this.#opts.maxPassphraseFailures,
+            failureWindowMs: this.#opts.passphraseFailureWindowMs,
+            lockoutMs: this.#opts.lockoutMs,
+            maxLockoutMs: this.#opts.maxLockoutMs,
+          });
     this.#limiter = new SlidingWindowLimiter(this.#opts.maxCommandsPerWindow, this.#opts.rateWindowMs);
+    this.#answerLimiter = new SlidingWindowLimiter(this.#opts.maxAnswersPerWindow, this.#opts.rateWindowMs);
   }
 
   get running(): boolean {
@@ -279,7 +289,7 @@ export class CommandBot {
     return this.#username;
   }
 
-  /** The command being confirmed, if any (for tests and status). */
+  /** The command being answered, if any (for tests and status). */
   get pendingConversation(): { command: string; userId: number } | undefined {
     const c = this.#conversation;
     return c ? { command: c.command.name, userId: c.user.id } : undefined;
@@ -306,6 +316,8 @@ export class CommandBot {
     if (this.#conversation) this.#end(this.#conversation, 'stopped');
     await this.#loop;
   }
+
+  // ---------- polling ----------
 
   async #run(): Promise<void> {
     let failures = 0;
@@ -365,10 +377,11 @@ export class CommandBot {
     const me = await this.#deps.api.getMe();
     this.#username = me.username ?? '';
     log.info(`Telegram commands on${me.username ? ` for @${me.username}` : ''} (chat ${this.#deps.policy.chatId})`);
+    const commands = [...this.#registry.values()];
     const menu = [
       { command: 'help', description: 'List the commands' },
-      ...[...this.#commands.values(), ...this.#conversational.values()].map((c) => ({ command: c.name, description: c.description })),
-      ...(this.#conversational.size > 0 ? [{ command: 'cancel', description: 'Cancel a pending change' }] : []),
+      ...commands.map((c) => ({ command: c.name, description: c.description })),
+      ...(commands.some((c) => c.kind !== 'query') ? [{ command: 'cancel', description: 'Cancel a pending change' }] : []),
     ];
     try {
       await this.#deps.api.setMyCommands(menu, this.#deps.policy.chatId);
@@ -377,6 +390,8 @@ export class CommandBot {
       log.warn(`Telegram commands: could not set the command menu: ${errorMessage(err)}`);
     }
   }
+
+  // ---------- every message ----------
 
   async #handle(update: TelegramUpdate): Promise<void> {
     const message = update.message;
@@ -393,43 +408,30 @@ export class CommandBot {
     const user = verdict.user;
     const nowMs = this.#clock.now().getTime();
     const ageSeconds = nowMs / 1000 - message.date;
-    const stale = ageSeconds > this.#opts.maxMessageAgeSeconds;
+    if (ageSeconds > this.#opts.maxMessageAgeSeconds) await this.#onStale(message, user, text, isCommand, ageSeconds);
+    else if (isCommand) await this.#onCommand(message, user, text, nowMs);
+    else await this.#onText(message, user, text, nowMs);
+  }
 
-    // Whatever the message is (even a stale one), the passphrase must not stay in the chat. A fresh answer
-    // to the passphrase question is deleted by the conversation itself, which expects it.
-    const passphraseAnswer =
-      !stale && !isCommand && this.#conversation?.user.id === user.id && this.#conversation.step?.kind === 'passphrase';
-    let leak = '';
-    if (!passphraseAnswer && this.#passphrase?.occursIn(text)) leak = (await this.#deleteMessage(message)) ? LEAK_DELETED : LEAK_NOT_DELETED;
-
-    if (stale) {
-      // Never log the text: it could be a passphrase.
-      log.info(`Telegram commands: ignoring a ${isCommand ? 'command' : 'message'} from user ${user.id}, sent ${duration(ageSeconds * 1000)} ago (too old)`);
-      if (leak) await this.#say(`${leak} It was too old to act on; nothing was run.`);
-      return;
+  /** An old message (sent while the conductor was down, or replayed): never acted on. */
+  async #onStale(message: TelegramMessage, user: TelegramUser, text: string, isCommand: boolean, ageSeconds: number): Promise<void> {
+    // Never log the text: it could be the passphrase.
+    log.info(`Telegram commands: ignoring a ${isCommand ? 'command' : 'message'} from user ${user.id}, sent ${duration(ageSeconds * 1000)} ago (too old)`);
+    const conversation = this.#conversation;
+    const atPassphrase = !isCommand && conversation?.user.id === user.id && conversation.step?.kind === 'passphrase';
+    if (atPassphrase && classifyAttempt(text) === 'attempt') {
+      await this.#say(`🔐 Your message was too old to act on; nothing was run. ${deletedNote(await this.#deleteMessage(message))}`);
     }
+  }
 
-    if (!isCommand) {
-      await this.#onText(message, user, text, leak);
-      return;
-    }
-
+  async #onCommand(message: TelegramMessage, user: TelegramUser, text: string, nowMs: number): Promise<void> {
     const parsed = parseCommand(text);
     // Addressed to another bot in the group: not ours to answer.
     if (parsed?.target !== undefined && parsed.target.toLowerCase() !== this.#username?.toLowerCase()) return;
+    if (!this.#withinLimit(this.#limiter, 'commands', nowMs, user)) return;
 
-    if (!this.#limiter.tryTake(nowMs)) {
-      // Tell them once per window, then stay quiet (replies cost too).
-      if (this.#rateLimitNoticeAt === undefined || nowMs - this.#rateLimitNoticeAt >= this.#opts.rateWindowMs) {
-        this.#rateLimitNoticeAt = nowMs;
-        this.#deps.reply(`🐢 Too many commands; ignoring them for up to ${duration(this.#opts.rateWindowMs)}.`);
-      }
-      log.warn(`Telegram commands: rate limit reached; ignoring a command from user ${user.id}`);
-      return;
-    }
-
-    const known = parsed && (this.#commands.has(parsed.name) || this.#conversational.has(parsed.name) || BUILT_IN.has(parsed.name));
-    if (!parsed || !known) {
+    const command = parsed ? this.#registry.get(parsed.name) : undefined;
+    if (!parsed || (!command && !BUILT_IN.has(parsed.name))) {
       this.#deps.reply(`🤷 Unknown command${parsed ? ` /${safe(parsed.name, 32)}` : ''}. Send /help for the list.`);
       return;
     }
@@ -437,26 +439,65 @@ export class CommandBot {
       this.#deps.reply(this.#help());
       return;
     }
-    const conversational = this.#conversational.get(parsed.name);
-    if (leak) {
-      // Never act on it: arguments could be echoed back (e.g. "can't read …"), and it can't be a valid one anyway.
-      this.#deps.reply(`⚠️ /${parsed.name} was not run. ${leak} Send the command alone; I ask for the passphrase when it's needed.`);
+    if (parsed.args !== '' && !(command && command.kind !== 'query' && command.acceptsArgs)) {
+      // Text after a change's command could be the passphrase, sent along with it by mistake.
+      const note =
+        command?.kind === 'mutable' && classifyAttempt(parsed.args) === 'attempt'
+          ? ` Send it alone; I ask for the passphrase when it's needed. ${deletedNote(await this.#deleteMessage(message))}`
+          : '';
+      this.#deps.reply(`⚠️ /${parsed.name} takes no arguments.${note}`);
       return;
     }
-    if (parsed.args !== '' && !conversational?.acceptsArgs) {
-      this.#deps.reply(`⚠️ /${parsed.name} takes no arguments.`);
+    if (!command) {
+      await this.#cancelCommand(user); // the only other built-in
       return;
     }
-    if (parsed.name === 'cancel') {
-      await this.#cancelCommand(user);
+    if (command.kind === 'query') {
+      await this.#query(command, user, nowMs);
       return;
     }
-    if (conversational) {
-      await this.#startConversation(conversational, message, user, parsed.args);
+    await this.#startConversation(command, message, user, parsed.args);
+  }
+
+  /** Text that isn't a command: an answer if the sender is in a conversation; otherwise mostly ignored. */
+  async #onText(message: TelegramMessage, user: TelegramUser, text: string, nowMs: number): Promise<void> {
+    const conversation = this.#conversation;
+    if (conversation?.step && conversation.user.id === user.id) {
+      if (this.#withinLimit(this.#answerLimiter, 'answers', nowMs, user)) await this.#answer(conversation, message, text);
       return;
     }
-    const command = this.#commands.get(parsed.name);
-    if (!command) return;
+    // Just after a conversation: a late answer (say it came too late), or the passphrase typed again after
+    // the passphrase question ended (delete it, whatever it is: it is never compared).
+    const ended = this.#lastEnded;
+    if (!ended || ended.userId !== user.id || nowMs - ended.atMs >= this.#opts.lateAnswerMs) return;
+    const kind = classifyAttempt(text);
+    const retypedPassphrase = kind === 'attempt' && ended.atPassphrase;
+    const lateAnswer = kind === 'answer-word' && ended.expired;
+    if (!retypedPassphrase && !lateAnswer) return; // ordinary chat
+    this.#lastEnded = undefined;
+    const cleanup = retypedPassphrase ? ` ${deletedNote(await this.#deleteMessage(message))}` : '';
+    await this.#say(
+      ended.expired
+        ? `⌛ That question had expired, so nothing was done.${cleanup} Send /${ended.command} again if you still want to.`
+        : `Nothing was waiting for an answer, so nothing was run.${cleanup}`,
+    );
+  }
+
+  /** Commands and answers are rate-limited; over the limit, say so once per window and ignore the rest. */
+  #withinLimit(limiter: SlidingWindowLimiter, what: 'commands' | 'answers', nowMs: number, user: TelegramUser): boolean {
+    if (limiter.tryTake(nowMs)) return true;
+    const last = this.#limitNoticeAt.get(what);
+    if (last === undefined || nowMs - last >= this.#opts.rateWindowMs) {
+      this.#limitNoticeAt.set(what, nowMs);
+      this.#deps.reply(`🐢 Too many ${what}; ignoring them for up to ${duration(this.#opts.rateWindowMs)}.`);
+    }
+    log.warn(`Telegram commands: rate limit reached; ignoring ${what === 'commands' ? 'a command' : 'an answer'} from user ${user.id}`);
+    return false;
+  }
+
+  // ---------- read-only queries ----------
+
+  async #query(command: QueryCommand, user: TelegramUser, nowMs: number): Promise<void> {
     const last = this.#lastRun.get(command.name);
     const cooldownMs = command.cooldownSeconds * 1000;
     if (last !== undefined && nowMs - last < cooldownMs) {
@@ -467,34 +508,17 @@ export class CommandBot {
       return;
     }
     this.#lastRun.set(command.name, nowMs);
-    await this.#execute(command, user);
-  }
-
-  // ---------- read-only commands ----------
-
-  async #execute(command: BotCommand, user: TelegramUser): Promise<void> {
-    const started = this.#clock.now().getTime();
     log.info(`Telegram commands: /${command.name} from user ${user.id}`);
     const result = await this.#guard(() => command.run());
-    let error: string | undefined;
     if (result.ok) {
       this.#deps.reply(result.value);
     } else if (result.outcome === 'failed') {
-      error = result.error;
-      log.warn(`Telegram commands: /${command.name} failed: ${error}`);
-      this.#deps.reply(`❌ /${command.name} failed: ${safe(error, 300)}`);
+      log.warn(`Telegram commands: /${command.name} failed: ${result.error}`);
+      this.#deps.reply(`❌ /${command.name} failed: ${safe(result.error, 300)}`);
     } else if (result.outcome === 'timed_out') {
-      error = result.error;
-      this.#deps.reply(`⌛ /${command.name} timed out (${error}). Try again later.`);
+      this.#deps.reply(`⌛ /${command.name} timed out (${result.error}). Try again later.`);
     }
-    this.#audit.record('command.handled', {
-      command: command.name,
-      user: user.id,
-      ...(user.username ? { userName: clip(user.username, 64) } : {}),
-      outcome: result.ok ? 'ok' : result.outcome,
-      ms: this.#clock.now().getTime() - started,
-      ...(error ? { error } : {}),
-    });
+    this.#recordHandled(command.name, user, nowMs, result.ok ? 'ok' : result.outcome, { error: result.ok ? undefined : result.error });
   }
 
   /**
@@ -528,16 +552,15 @@ export class CommandBot {
     }
   }
 
-  // ---------- commands that change something ----------
+  // ---------- conversations ----------
 
   async #startConversation(command: ConversationCommand, message: TelegramMessage, user: TelegramUser, args: string): Promise<void> {
     const nowMs = this.#clock.now().getTime();
     log.info(`Telegram commands: /${command.name} from user ${user.id}`);
-    if (command.kind === 'mutable' && this.#lockedUntil > nowMs) {
-      await this.#say(
-        `🔒 Changes are locked for another ${duration(this.#lockedUntil - nowMs)} after too many wrong passphrases. /${command.name} was not run.`,
-      );
-      this.#recordConversation(command, user, nowMs, 'locked');
+    const locked = command.kind === 'mutable' ? (this.#gate?.lockedForMs(nowMs) ?? 0) : 0;
+    if (locked > 0) {
+      await this.#say(`🔒 Changes are locked for another ${duration(locked)} after too many wrong passphrases. /${command.name} was not run.`);
+      this.#recordHandled(command.name, user, nowMs, 'locked');
       return;
     }
     const current = this.#conversation;
@@ -545,29 +568,34 @@ export class CommandBot {
       const other = current.user.id !== user.id;
       if (other && current.command.kind === 'mutable') {
         // Someone else's change in progress is never interfered with.
-        await this.#say(`⏳ ${safe(actorOf(current.user).label)} is answering /${current.command.name}. Try again when that's done.`);
+        await this.#say(`⏳ ${safe(actorName(current.user))} is answering /${current.command.name}. Try again when that's done.`);
         return;
       }
       this.#end(current, 'superseded');
-      if (other) {
-        // Read-only browsing gives way (it must never hold up e.g. a /pause).
-        await this.#say(`👋 ${safe(actorOf(current.user).label)}'s /${current.command.name} was closed for /${command.name}.`);
-      } else if (current.command.kind === 'mutable') {
-        await this.#say(`✋ The pending /${current.command.name} was cancelled.`);
-      }
+      // Read-only browsing gives way (it must never hold up e.g. a /pause).
+      if (other) await this.#say(`👋 ${safe(actorName(current.user))}'s /${current.command.name} was closed for /${command.name}.`);
+      else if (current.command.kind === 'mutable') await this.#say(`✋ The pending /${current.command.name} was cancelled.`);
     }
 
     const conversation: Conversation = { command, user, startedMs: nowMs, invalid: 0 };
     this.#conversation = conversation;
     const actor: Actor = { id: user.id, ...(user.username ? { username: user.username } : {}) };
-    const step = await this.#guard(() => command.begin(actor, args));
-    if (this.#conversation !== conversation) return; // stopped meanwhile
-    if (!step.ok) {
-      this.#end(conversation, step.outcome, step.error);
-      if (step.outcome !== 'stopped') await this.#say(`❌ /${command.name} failed: ${safe(step.error, 300)}. Nothing changed.`);
-      return;
-    }
-    await this.#advance(conversation, step.value, message);
+    const step = await this.#step(conversation, () => command.begin(actor, args));
+    if (step) await this.#advance(conversation, step, message);
+  }
+
+  /**
+   * Runs a conversation's command code (begin, read). Returns its result; or, if it failed, timed out or
+   * the bot stopped (or the conversation ended meanwhile), ends the conversation, says so, and returns
+   * undefined.
+   */
+  async #step<T>(conversation: Conversation, fn: () => T | Promise<T>): Promise<T | undefined> {
+    const result = await this.#guard(fn);
+    if (this.#conversation !== conversation) return undefined;
+    if (result.ok) return result.value;
+    this.#end(conversation, result.outcome, result.error);
+    if (result.outcome !== 'stopped') await this.#say(`❌ /${conversation.command.name} failed: ${safe(result.error, 300)}. Nothing changed.`);
+    return undefined;
   }
 
   /** Moves to the next step: asks its question, or ends the conversation if there's nothing to do. */
@@ -592,7 +620,7 @@ export class CommandBot {
   /** Sends a question (as a reply that opens the answer box) and starts waiting for the answer. */
   async #ask(conversation: Conversation, html: string, replyTo: TelegramMessage): Promise<void> {
     const step = conversation.step;
-    const placeholder = step?.kind === 'passphrase' ? 'passphrase or cancel' : step?.kind === 'input' && step.placeholder ? step.placeholder : 'your answer';
+    const placeholder = step?.kind === 'passphrase' ? 'passphrase or cancel' : (step?.placeholder ?? 'your answer');
     await this.#say(html, { replyToMessageId: replyTo.message_id, forceReply: true, placeholder });
     if (this.#conversation !== conversation) return;
     this.#clock.clearTimeout(conversation.timer);
@@ -603,119 +631,74 @@ export class CommandBot {
     if (this.#conversation !== conversation) return;
     const name = conversation.command.name;
     this.#end(conversation, 'expired');
-    this.#lastExpired = { userId: conversation.user.id, command: name, atMs: this.#clock.now().getTime() };
     // Browsing just ends quietly; a change that was being confirmed must say it didn't happen.
     if (conversation.command.kind === 'mutable') {
       void this.#say(`⌛ No answer within ${duration(this.#opts.conversationTimeoutMs)}: /${name} cancelled. Nothing changed.`);
     }
   }
 
-  /** A text message from an allowed user: an answer if they're in a conversation, otherwise ignored. */
-  async #onText(message: TelegramMessage, user: TelegramUser, text: string, leak: string): Promise<void> {
-    const conversation = this.#conversation;
-    if (conversation && conversation.user.id === user.id && conversation.step) {
-      await this.#answer(conversation, message, text, leak);
-      return;
-    }
-    if (leak) {
-      await this.#say(`${leak} Nothing was waiting for it, so nothing was run.`);
-      return;
-    }
-    // A late answer to a question that expired: say so, rather than leave them wondering.
-    const expired = this.#lastExpired;
-    const nowMs = this.#clock.now().getTime();
-    if (expired && expired.userId === user.id && nowMs - expired.atMs < this.#opts.lateAnswerMs && ANSWER_WORDS.has(normalizeAnswer(text))) {
-      this.#lastExpired = undefined;
-      await this.#say(`⌛ That question had expired, so nothing was done. Send /${expired.command} again if you still want to.`);
-    }
-    // Anything else is ordinary chat.
-  }
-
-  async #answer(conversation: Conversation, message: TelegramMessage, text: string, leak: string): Promise<void> {
+  async #answer(conversation: Conversation, message: TelegramMessage, text: string): Promise<void> {
     const step = conversation.step;
     if (!step) return;
     this.#clock.clearTimeout(conversation.timer);
-    const name = conversation.command.name;
-    const word = normalizeAnswer(text);
-    if (CANCEL_WORDS.has(word)) {
+    if (CANCEL_WORDS.has(normalizeAnswer(text))) {
       this.#end(conversation, 'cancelled');
       await this.#say(this.#cancelledText(conversation));
       return;
     }
-
     if (step.kind === 'passphrase') {
-      // Not an attempt at all: an answer word, or too short to be the passphrase (e.g. a number meant
-      // for the previous question). Asked again rather than counted as a wrong passphrase.
-      if (!this.#passphrase?.matches(text)) {
-        if (ANSWER_WORDS.has(word)) {
-          await this.#unexpected(conversation, message, '🔐 That was an answer word, not the passphrase.');
-          return;
-        }
-        if (text.trim().length < MIN_PASSPHRASE_LENGTH) {
-          await this.#unexpected(conversation, message, "🔐 That's too short to be the passphrase.");
-          return;
-        }
-      }
-      // Any answer from here on may be (close to) the passphrase: delete it before anything else.
-      const note = (await this.#deleteMessage(message)) ? '' : ANSWER_NOT_DELETED;
-      if (this.#conversation !== conversation) return;
-      if (!this.#passphrase?.matches(text)) {
-        await this.#wrongPassphrase(conversation, note);
-        return;
-      }
-      this.#failures = [];
-      const result = await this.#guard(() => step.run());
-      if (this.#conversation !== conversation) return;
-      if (result.ok) {
-        const reply = typeof result.value === 'string' ? { text: result.value } : result.value;
-        if ('error' in reply) log.warn(`Telegram commands: /${name} did not go through: ${reply.error}`);
-        this.#end(conversation, 'error' in reply ? 'failed' : 'ok', 'error' in reply ? reply.error : undefined);
-        await this.#say(`${reply.text}${note ? `\n\n${note}` : ''}`);
-      } else {
-        this.#end(conversation, result.outcome, result.error);
-        if (result.outcome !== 'stopped') {
-          log.warn(`Telegram commands: /${name} failed: ${result.error ?? result.outcome}`);
-          await this.#say(`❌ /${name} failed: ${safe(result.error, 300)}. It may or may not have taken effect: check /status.${note ? `\n\n${note}` : ''}`);
-        }
-      }
+      await this.#passphraseAnswer(conversation, step, message, text);
       return;
     }
+    const result = await this.#step(conversation, () => step.read(text));
+    if (!result) return;
+    if ('next' in result) {
+      if (result.choice) conversation.choice = result.choice;
+      await this.#advance(conversation, result.next, message);
+      return;
+    }
+    const why = result.invalid ? `⚠️ ${safe(result.invalid, 300)}` : undefined;
+    // In a change, an answer that fits nothing may be the passphrase, sent too early: remove it.
+    if (conversation.command.kind === 'mutable' && classifyAttempt(text) === 'attempt') {
+      const deleted = await this.#deleteMessage(message);
+      if (this.#conversation !== conversation) return;
+      await this.#unexpected(conversation, message, `${why ? `${why} ` : ''}🔐 ${deletedNote(deleted)} Answer this question first; the passphrase comes last.`);
+      return;
+    }
+    await this.#unexpected(conversation, message, why);
+  }
 
-    if (leak) {
-      await this.#unexpected(conversation, message, `${leak} Answer this question first; I ask for the passphrase after it.`);
+  async #passphraseAnswer(conversation: Conversation, step: Extract<Step, { kind: 'passphrase' }>, message: TelegramMessage, text: string): Promise<void> {
+    // Not an attempt at all (judged without looking at the passphrase): asked again, not counted.
+    const kind = classifyAttempt(text);
+    if (kind !== 'attempt') {
+      await this.#unexpected(conversation, message, kind === 'answer-word' ? '🔐 That was an answer word, not the passphrase.' : "🔐 That's too short to be the passphrase.");
       return;
     }
-    if (step.kind === 'input') {
-      const result = await this.#guard(() => step.read(text));
-      if (this.#conversation !== conversation) return;
-      if (!result.ok) {
-        this.#end(conversation, result.outcome, result.error);
-        if (result.outcome !== 'stopped') await this.#say(`❌ /${name} failed: ${safe(result.error, 300)}. Nothing changed.`);
-        return;
-      }
-      if ('invalid' in result.value) {
-        await this.#unexpected(conversation, message, `⚠️ ${safe(result.value.invalid, 300)}`);
-        return;
-      }
-      await this.#advance(conversation, result.value.next, message);
-      return;
-    }
-
-    // A question with choices.
-    const choice = step.choices.find((c) => c.words.includes(word));
-    if (!choice) {
-      await this.#unexpected(conversation, message);
-      return;
-    }
-    conversation.choice = choice.label;
-    const next = await this.#guard(() => choice.next());
+    // Every attempt is deleted, right or wrong.
+    const deleted = await this.#deleteMessage(message);
     if (this.#conversation !== conversation) return;
-    if (!next.ok) {
-      this.#end(conversation, next.outcome, next.error);
-      if (next.outcome !== 'stopped') await this.#say(`❌ /${name} failed: ${safe(next.error, 300)}. Nothing changed.`);
+    const note = deleted ? '' : `\n\n⚠️ I couldn't delete your passphrase message ${CANNOT_DELETE}.`;
+    const check: GateResult = this.#gate ? this.#gate.check(text, this.#clock.now().getTime()) : { ok: false, failures: 0 };
+    if (!check.ok) {
+      await this.#wrongPassphrase(conversation, check, note);
       return;
     }
-    await this.#advance(conversation, next.value, message);
+    const result = await this.#guard(() => step.run());
+    if (this.#conversation !== conversation) return;
+    const name = conversation.command.name;
+    if (!result.ok) {
+      this.#end(conversation, result.outcome, result.error);
+      if (result.outcome !== 'stopped') {
+        log.warn(`Telegram commands: /${name} failed: ${result.error ?? result.outcome}`);
+        await this.#say(`❌ /${name} failed: ${safe(result.error, 300)}. It may or may not have taken effect: check /status.${note}`);
+      }
+      return;
+    }
+    const reply = typeof result.value === 'string' ? { text: result.value } : result.value;
+    if ('error' in reply) log.warn(`Telegram commands: /${name} did not go through: ${reply.error}`);
+    this.#end(conversation, 'error' in reply ? 'failed' : 'ok', 'error' in reply ? reply.error : undefined);
+    await this.#say(`${reply.text}${note}`);
   }
 
   /** An answer that fits nothing: ask again, or give up after too many. */
@@ -733,31 +716,31 @@ export class CommandBot {
     await this.#ask(conversation, `${why} ${hint}`, message);
   }
 
-  async #wrongPassphrase(conversation: Conversation, deletedNote: string): Promise<void> {
-    const nowMs = this.#clock.now().getTime();
+  async #wrongPassphrase(conversation: Conversation, check: Extract<GateResult, { ok: false }>, note: string): Promise<void> {
     const user = conversation.user;
     const name = conversation.command.name;
-    this.#failures = [...this.#failures.filter((t) => nowMs - t < this.#opts.passphraseFailureWindowMs), nowMs];
-    const failures = this.#failures.length;
-    log.warn(`Telegram commands: wrong passphrase for /${name} from user ${user.id} (${failures} recent failure(s))`);
+    this.#end(conversation, check.alreadyLocked ? 'locked' : 'denied');
+    if (check.alreadyLocked) {
+      await this.#say(`🔒 Changes are locked for another ${duration(check.lockedForMs ?? 0)}. /${name} was not run.${note}`);
+      return;
+    }
+    log.warn(`Telegram commands: wrong passphrase for /${name} from user ${user.id} (${check.failures} recent failure(s))`);
     this.#audit.record('command.auth_failed', {
       command: name,
       user: user.id,
       ...(user.username ? { userName: clip(user.username, 64) } : {}),
-      failures,
+      failures: check.failures,
     });
-    this.#end(conversation, 'denied');
     let lock = '';
-    if (failures >= this.#opts.maxPassphraseFailures) {
-      this.#lockedUntil = nowMs + this.#opts.lockoutMs;
-      this.#failures = [];
-      log.error(`Telegram commands: changes locked for ${duration(this.#opts.lockoutMs)} after ${failures} wrong passphrases`);
-      this.#audit.record('command.locked', { until: new Date(this.#lockedUntil).toISOString(), failures, user: user.id });
+    if (check.lockedForMs !== undefined) {
+      const until = new Date(this.#clock.now().getTime() + check.lockedForMs);
+      log.error(`Telegram commands: changes locked for ${duration(check.lockedForMs)} after ${check.failures} wrong passphrases`);
+      this.#audit.record('command.locked', { until: until.toISOString(), failures: check.failures, user: user.id });
       lock =
-        `\n🔒 Changes are now locked for ${duration(this.#opts.lockoutMs)}. If that wasn't you, someone can post as an ` +
+        `\n🔒 Changes are now locked for ${duration(check.lockedForMs)}. If that wasn't you, someone can post as an ` +
         'allowed user: end their Telegram sessions and change the passphrase.';
     }
-    await this.#say(`❌ Wrong passphrase: /${name} was not run.${lock}${deletedNote ? `\n\n${deletedNote}` : ''}`);
+    await this.#say(`❌ Wrong passphrase: /${name} was not run.${lock}${note}`);
   }
 
   async #cancelCommand(user: TelegramUser): Promise<void> {
@@ -767,7 +750,7 @@ export class CommandBot {
       return;
     }
     if (conversation.user.id !== user.id) {
-      await this.#say(`Nothing of yours to cancel (${safe(actorOf(conversation.user).label)} is answering /${conversation.command.name}).`);
+      await this.#say(`Nothing of yours to cancel (${safe(actorName(conversation.user))} is answering /${conversation.command.name}).`);
       return;
     }
     this.#end(conversation, 'cancelled');
@@ -781,31 +764,42 @@ export class CommandBot {
   }
 
   /** Ends a conversation and records how. */
-  #end(conversation: Conversation, outcome: ConversationOutcome, error?: string): void {
+  #end(conversation: Conversation, outcome: HandledOutcome, error?: string): void {
     this.#clock.clearTimeout(conversation.timer);
     if (this.#conversation === conversation) this.#conversation = undefined;
-    this.#recordConversation(conversation.command, conversation.user, conversation.startedMs, outcome, conversation.choice, error);
+    this.#lastEnded = {
+      userId: conversation.user.id,
+      command: conversation.command.name,
+      atMs: this.#clock.now().getTime(),
+      // People retype the passphrase after a wrong one, or after the question expired (not after it worked).
+      atPassphrase: conversation.step?.kind === 'passphrase' && (outcome === 'denied' || outcome === 'expired'),
+      expired: outcome === 'expired',
+    };
+    this.#recordHandled(conversation.command.name, conversation.user, conversation.startedMs, outcome, { choice: conversation.choice, error });
   }
 
-  #recordConversation(command: ConversationCommand, user: TelegramUser, startedMs: number, outcome: ConversationOutcome, choice?: string, error?: string): void {
+  /** The audit record of every command (never its text, which could hold anything). */
+  #recordHandled(command: string, user: TelegramUser, startedMs: number, outcome: HandledOutcome, extra: { choice?: string | undefined; error?: string | undefined } = {}): void {
     this.#audit.record('command.handled', {
-      command: command.name,
+      command,
       user: user.id,
       ...(user.username ? { userName: clip(user.username, 64) } : {}),
       outcome,
-      ...(choice ? { choice } : {}),
+      ...(extra.choice ? { choice: extra.choice } : {}),
       ms: this.#clock.now().getTime() - startedMs,
-      ...(error ? { error } : {}),
+      ...(extra.error ? { error: extra.error } : {}),
     });
   }
 
-  /** Deletes a message that (may) contain the passphrase. Best effort: returns whether it worked. */
+  // ---------- sending ----------
+
+  /** Deletes a message that could hold the passphrase. Best effort: returns whether it worked. */
   async #deleteMessage(message: TelegramMessage): Promise<boolean> {
     try {
       await this.#deps.api.deleteMessage(message.message_id);
       return true;
     } catch (err) {
-      log.warn(`Telegram commands: could not delete a message containing the passphrase: ${errorMessage(err)}`);
+      log.warn(`Telegram commands: could not delete a message: ${errorMessage(err)}`);
       return false;
     }
   }
@@ -821,17 +815,16 @@ export class CommandBot {
   }
 
   #help(): string {
-    const line = (c: BotCommand | ConversationCommand) =>
-      `/${c.name}: ${safe(c.description)}${'script' in c && c.script ? ` <i>(like npm run ${safe(c.script, 40)})</i>` : ''}`;
-    const all = [...this.#conversational.values()];
-    const readOnly = [...this.#commands.values(), ...all.filter((c) => c.kind === 'interactive')];
+    const line = (c: BotCommand) => `/${c.name}: ${safe(c.description)}${c.kind === 'query' && c.script ? ` <i>(like npm run ${safe(c.script, 40)})</i>` : ''}`;
+    const all = [...this.#registry.values()];
+    const readOnly = all.filter((c) => c.kind !== 'mutable');
     const mutable = all.filter((c) => c.kind === 'mutable');
     if (mutable.length === 0) {
       return [
         '🌱 <b>Lawn conductor commands</b> (read-only)',
         ...readOnly.map(line),
         '/help: this list',
-        ...(all.length > 0 ? ['/cancel: close what is waiting for your answer'] : []),
+        ...(all.some((c) => c.kind === 'interactive') ? ['/cancel: close what is waiting for your answer'] : []),
       ].join('\n');
     }
     return [
@@ -888,12 +881,3 @@ export class CommandBot {
     });
   }
 }
-
-const isConversation = (c: BotCommand | ConversationCommand): c is ConversationCommand =>
-  'kind' in c && (c.kind === 'mutable' || c.kind === 'interactive');
-
-const actorOf = (user: TelegramUser): Actor & { label: string } => ({
-  id: user.id,
-  ...(user.username ? { username: user.username } : {}),
-  label: user.username ? `@${user.username}` : `user ${user.id}`,
-});

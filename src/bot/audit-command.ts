@@ -1,6 +1,6 @@
 import type { AuditEvent } from '../audit/audit.ts';
 import { describe, filterEvents, RECOVERY_TYPES, summarize, type AuditFilter } from '../audit/report.ts';
-import type { InteractiveCommand, InputResult, Step } from './conversation.ts';
+import { done, type InputResult, type InteractiveCommand, type Step } from './conversation.ts';
 import { duration, fitLines, safe } from './format.ts';
 
 /**
@@ -79,7 +79,8 @@ export const parseAuditQuery = (text: string, base: AuditQuery = DEFAULT_QUERY):
       period = { text: `${m[1]}${m[2] === 'min' ? 'm' : m[2]}`, ms };
       continue;
     }
-    return { problem: `"${word.slice(0, 20)}" is neither a view (all, problems, watering, commands, summary) nor a period like 7d.` };
+    // Never repeat what was typed (it could be something that shouldn't be in the chat twice).
+    return { problem: 'That is neither a view (all, problems, watering, commands, summary) nor a period like 7d.' };
   }
   return { view: view ?? base.view, period: period?.text ?? base.period, periodMs: period?.ms ?? base.periodMs };
 };
@@ -129,12 +130,12 @@ export const buildAuditCommand = (deps: AuditCommandDeps): InteractiveCommand =>
   };
 
   /** Splits events (newest first) into pages by count and length. */
-  const paginate = (events: readonly AuditEvent[]): AuditEvent[][] => {
+  const paginate = (events: readonly AuditEvent[], rendered: (e: AuditEvent) => string): AuditEvent[][] => {
     const pages: AuditEvent[][] = [];
     let page: AuditEvent[] = [];
     let chars = 0;
     for (const e of events) {
-      const size = render(e).length + 20;
+      const size = rendered(e).length + 20;
       if (page.length > 0 && (page.length >= pageSize || chars + size > PAGE_CHARS)) {
         pages.push(page);
         page = [];
@@ -154,13 +155,31 @@ export const buildAuditCommand = (deps: AuditCommandDeps): InteractiveCommand =>
     acceptsArgs: true,
     begin: async (_actor, args) => {
       const query = args.trim() === '' ? DEFAULT_QUERY : parseAuditQuery(args);
-      if ('problem' in query) return { kind: 'done', text: `⚠️ ${safe(query.problem)}\nFor example: /audit, /audit problems, /audit summary 7d.` };
+      if ('problem' in query) return done(`⚠️ ${safe(query.problem)}\nFor example: /audit, /audit problems, /audit summary 7d.`);
       const snapshot = await deps.read();
       const at = now();
+      // Each answer shows a page of one of a few queries: work each query out once, not on every page.
+      const rendered = new WeakMap<AuditEvent, string>();
+      const renderOnce = (e: AuditEvent): string => {
+        let html = rendered.get(e);
+        if (html === undefined) rendered.set(e, (html = render(e)));
+        return html;
+      };
+      const cache = new Map<string, { selected: AuditEvent[]; pages: AuditEvent[][] }>();
+      const select = (q: AuditQuery, since: Date) => {
+        const key = `${q.view}:${q.periodMs}`;
+        let hit = cache.get(key);
+        if (!hit) {
+          const selected = filterEvents(snapshot.events, { since, ...VIEWS[q.view].filter });
+          hit = { selected, pages: q.view === 'summary' ? [] : paginate([...selected].reverse(), renderOnce) };
+          cache.set(key, hit);
+        }
+        return hit;
+      };
 
       const show = (q: AuditQuery, pageIndex = 0): Step => {
         const since = new Date(at.getTime() - q.periodMs);
-        const selected = filterEvents(snapshot.events, { since, ...VIEWS[q.view].filter });
+        const { selected, pages: all } = select(q, since);
         const notes: string[] = [];
         const earliest = snapshot.events[0];
         if (snapshot.truncated && earliest && new Date(earliest.ts).getTime() > since.getTime()) {
@@ -179,7 +198,6 @@ export const buildAuditCommand = (deps: AuditCommandDeps): InteractiveCommand =>
         } else if (selected.length === 0) {
           body = `📜 <b>Audit</b> · ${VIEWS[q.view].label} · ${period}\nNothing recorded.`;
         } else {
-          const all = paginate([...selected].reverse());
           pages = all.length;
           const index = Math.min(pageIndex, pages - 1);
           const lines = [
@@ -193,7 +211,7 @@ export const buildAuditCommand = (deps: AuditCommandDeps): InteractiveCommand =>
               lines.push('', `<b>${safe(d)}</b>`);
               day = d;
             }
-            lines.push(render(e));
+            lines.push(renderOnce(e));
           }
           if (index === pages - 1) lines.push('', `(that's everything for the ${period})`);
           body = lines.join('\n');
@@ -202,7 +220,7 @@ export const buildAuditCommand = (deps: AuditCommandDeps): InteractiveCommand =>
 
         const read = (answer: string): InputResult => {
           const word = answer.trim().toLowerCase();
-          if (word === 'done') return { next: { kind: 'done', text: '👋 /audit closed.' } };
+          if (word === 'done') return { next: done('👋 /audit closed.') };
           if (word === 'more' || word === 'next') {
             if (q.view === 'summary') return { invalid: 'The summary has only one page.' };
             if (pageIndex + 1 >= pages) return { invalid: 'That was the oldest page.' };

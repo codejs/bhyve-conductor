@@ -27,14 +27,9 @@ const ONE_ZONE_DERIVING = { zones: [{ name: 'Beds', deviceId: 'dev2', station: 1
 
 /** Step helpers: answer an input/ask step and get the next step, or the reason it was refused. */
 const answer = async (step: Step, text: string): Promise<Step | string> => {
-  if (step.kind === 'ask') {
-    const choice = step.choices.find((c) => c.words.includes(text));
-    if (!choice) return `no choice "${text}"`;
-    return choice.next();
-  }
   if (step.kind !== 'input') throw new Error(`expected a question, got ${step.kind}: ${step.text}`);
   const result: InputResult = await step.read(text);
-  return 'next' in result ? result.next : result.invalid;
+  return 'next' in result ? result.next : (result.invalid ?? `not understood: "${text}"`);
 };
 const next = async (step: Step, ...texts: string[]): Promise<Step> => {
   let s = step;
@@ -293,7 +288,7 @@ describe('/config', () => {
     const t = await setup();
     const bad = await next(await t.begin(), '1', '45', 'done');
     expect(bad).toMatchObject({
-      kind: 'ask',
+      kind: 'input',
       text:
         "⚠️ <b>These values don't fit together:</b>\n• targetPct (40) must be above thresholdPct (45)\n\n" +
         'Reply <b>edit</b> to go through the settings again (your new values are kept), or <b>cancel</b>.',

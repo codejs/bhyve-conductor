@@ -147,6 +147,23 @@ describe('TelegramClient (commands)', () => {
     expect(auto?.message?.is_automatic_forward).toBe(true);
   });
 
+  it('getUpdates drops a username that is not a Telegram username (it ends up in messages and logs)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        result: [
+          { update_id: 1, message: message({ from: { id: 4242, is_bot: false, username: '<b>evil</b>' } }) },
+          { update_id: 2, message: message({ from: { id: 4242, is_bot: false, username: 'fine_name_42' } }) },
+        ],
+      }),
+    );
+
+    const [evil, fine] = await client().getUpdates({ timeoutSeconds: 0 });
+
+    expect(evil?.message?.from).toEqual({ id: 4242, is_bot: false }); // kept, without the username
+    expect(fine?.message?.from?.username).toBe('fine_name_42');
+  });
+
   it('getUpdates drops a message it cannot trust, but keeps its id so it is acknowledged', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({

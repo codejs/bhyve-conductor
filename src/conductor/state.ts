@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { writeFileAtomic } from '../files.ts';
 import { z } from 'zod';
 import type { StationRun } from '../bhyve/types.ts';
 import type { AlertState } from './alerts.ts';
@@ -125,8 +126,6 @@ export class FileStateStore {
       // Only written while paused, so files stay as they were for everyone else.
       ...(state.paused ? { paused: { since: state.paused.since.toISOString(), by: state.paused.by } } : {}),
     };
-    const tmp = `${this.#path}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
-    await rename(tmp, this.#path);
+    await writeFileAtomic(this.#path, `${JSON.stringify(body, null, 2)}\n`);
   }
 }

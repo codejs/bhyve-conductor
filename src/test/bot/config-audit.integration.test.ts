@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FileAuditLog, readAuditTail } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
-import { buildAuditCommand } from '../../bot/audit-command.ts';
 import { CommandBot } from '../../bot/bot.ts';
-import { buildConfigCommand } from '../../bot/config-command.ts';
+import { zonesBySensor } from '../../bot/commands.ts';
+import { buildBotCommands } from '../../bot/registry.ts';
 import { VirtualClock } from '../../clock.ts';
 import { parseConductorConfig } from '../../conductor/config.ts';
 import { ConfigEditor } from '../../conductor/config-editor.ts';
@@ -65,10 +65,20 @@ describe('/config and /audit through Telegram (integration)', () => {
     const bot = new CommandBot({
       api: api.bot,
       policy: POLICY,
-      commands: [
-        buildAuditCommand({ read: () => readAuditTail(auditPath, 2 * 1024 * 1024), timeZone: 'UTC', now: () => clock.now() }),
-        buildConfigCommand({ editor: new ConfigEditor({ path: configPath, config, audit }) }),
-      ],
+      // Assembled exactly as index.ts does.
+      commands: buildBotCommands({
+        bhyve: { getDevices: () => fake.bhyve.getDevices() },
+        sensors: source,
+        zonesBySensor: zonesBySensor(config.zones),
+        status: () => monitor.status(),
+        timeZone: 'UTC',
+        now: () => clock.now(),
+        readAudit: () => readAuditTail(auditPath, 2 * 1024 * 1024),
+        changes: {
+          control: { status: () => monitor.status(), pause: (by) => monitor.pause(by), resume: (by, held) => monitor.resume(by, held) },
+          editor: new ConfigEditor({ path: configPath, config, audit }),
+        },
+      }),
       passphrase: PASS,
       reply: () => {},
       audit,

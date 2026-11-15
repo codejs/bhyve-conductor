@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot, type CommandBotOptions } from '../../bot/bot.ts';
-import type { BotCommand } from '../../bot/commands.ts';
-import type { InteractiveCommand, MutableCommand, Step } from '../../bot/conversation.ts';
+import { ask, type BotCommand, type InteractiveCommand, type MutableCommand, type QueryCommand, type Step } from '../../bot/conversation.ts';
 import { VirtualClock } from '../../clock.ts';
 import { log } from '../../log.ts';
 import type { TelegramMessage, TelegramUpdate } from '../../notify/telegram.ts';
@@ -35,12 +34,12 @@ const scripted = () => {
     name: 'pause',
     description: 'Pause watering',
     begin: vi.fn(
-      (): Step => ({
-        kind: 'ask',
-        text: '⚠️ Watering in progress. Pause anyway? Reply <b>yes</b> or <b>cancel</b>.',
-        hint: 'Reply yes to pause, or cancel.',
-        choices: [{ words: ['yes', 'y', 'confirm', 'ok'], label: 'yes', next: () => passphraseStep('🔐 Send the passphrase to pause.', pauseRun) }],
-      }),
+      (): Step =>
+        ask({
+          text: '⚠️ Watering in progress. Pause anyway? Reply <b>yes</b> or <b>cancel</b>.',
+          hint: 'Reply yes to pause, or cancel.',
+          choices: [{ words: ['yes', 'y', 'confirm', 'ok'], label: 'yes', next: () => passphraseStep('🔐 Send the passphrase to pause.', pauseRun) }],
+        }),
     ),
   };
   const resume: MutableCommand = {
@@ -48,15 +47,15 @@ const scripted = () => {
     name: 'resume',
     description: 'Resume watering',
     begin: vi.fn(
-      (): Step => ({
-        kind: 'ask',
-        text: 'Reply <b>continue</b>, <b>discard</b> or <b>cancel</b>.',
-        hint: 'Reply continue, discard or cancel.',
-        choices: [
-          { words: ['continue', '1'], label: 'continue', next: () => passphraseStep('🔐 Passphrase to resume and continue.', () => resumeRun('continue')) },
-          { words: ['discard', '2'], label: 'discard', next: () => passphraseStep('🔐 Passphrase to resume and discard.', () => resumeRun('discard')) },
-        ],
-      }),
+      (): Step =>
+        ask({
+          text: 'Reply <b>continue</b>, <b>discard</b> or <b>cancel</b>.',
+          hint: 'Reply continue, discard or cancel.',
+          choices: [
+            { words: ['continue', '1'], label: 'continue', next: () => passphraseStep('🔐 Passphrase to resume and continue.', () => resumeRun('continue')) },
+            { words: ['discard', '2'], label: 'discard', next: () => passphraseStep('🔐 Passphrase to resume and discard.', () => resumeRun('discard')) },
+          ],
+        }),
     ),
   };
   const now: MutableCommand = { kind: 'mutable', name: 'now', description: 'Do it now', begin: () => passphraseStep('🔐 Passphrase?', nowRun) };
@@ -64,14 +63,15 @@ const scripted = () => {
   return { pause, resume, now, noop, pauseRun, resumeRun, nowRun };
 };
 
-const statusCommand = (): BotCommand & { run: ReturnType<typeof vi.fn> } => ({
+const statusCommand = (): QueryCommand & { run: ReturnType<typeof vi.fn> } => ({
+  kind: 'query',
   name: 'status',
   description: 'Status',
   cooldownSeconds: 0,
   run: vi.fn(async () => '🌱 status'),
 });
 
-const setup = (opts: { policy?: CommandPolicy; options?: Partial<CommandBotOptions>; commands?: (BotCommand | MutableCommand | InteractiveCommand)[] } = {}) => {
+const setup = (opts: { policy?: CommandPolicy; options?: Partial<CommandBotOptions>; commands?: BotCommand[] } = {}) => {
   const clock = new VirtualClock(START);
   const fake = fakeBotApi();
   const audit = new MemoryAuditLog(() => clock.now());
@@ -318,17 +318,40 @@ describe('CommandBot conversations', () => {
       expect(JSON.stringify(t.audit.events)).not.toContain('open sesame 41');
     });
 
-    it('gives no second try: the right passphrase afterwards runs nothing (and is deleted)', async () => {
+    it('gives no second try: the passphrase typed again afterwards runs nothing, and is deleted (whatever it is)', async () => {
       const t = track(setup());
       await t.start();
 
       await t.send('/pause', 'yes', 'wrong-passphrase');
-      const [late] = await t.send(PASS);
+      const [retyped] = await t.send(PASS);
 
       expect(t.pauseRun).not.toHaveBeenCalled();
-      expect(t.fake.deleted).toContain(late?.message?.message_id);
-      expect(t.said().at(-1)).toBe('🔐 I deleted your message because it contained the passphrase. Nothing was waiting for it, so nothing was run.');
+      expect(t.fake.deleted).toContain(retyped?.message?.message_id);
+      expect(t.said().at(-1)).toBe('Nothing was waiting for an answer, so nothing was run. I deleted your message in case it was the passphrase.');
       expectNoLeak(t);
+    });
+
+    it('deletes only the next message after a wrong passphrase, and only if it could be one', async () => {
+      const t = track(setup());
+      await t.start();
+
+      await t.send('/pause', 'yes', 'wrong-passphrase');
+      await t.send('ok'); // too short / an answer word: left alone, and nothing said
+      const [again] = await t.send('wrong-again-1');
+      const [chat] = await t.send('and then some ordinary chat');
+
+      expect(t.fake.deleted).toEqual([expect.any(Number), again?.message?.message_id]); // the wrong answer itself, then the retry
+      expect(t.fake.deleted).not.toContain(chat?.message?.message_id);
+    });
+
+    it('does not delete what follows a change that worked', async () => {
+      const t = track(setup());
+      await t.start();
+
+      await t.send('/now', PASS);
+      const [thanks] = await t.send('thanks, that was quick');
+
+      expect(t.fake.deleted).not.toContain(thanks?.message?.message_id);
     });
 
     it.each(['x'.repeat(5000), PASS.toUpperCase(), `${PASS}.`, PASS.replace(' ', '  '), 'abcdefgh'])('treats %j as wrong', async (answer) => {
@@ -371,6 +394,30 @@ describe('CommandBot conversations', () => {
       expect(t.nowRun).toHaveBeenCalledOnce();
     });
 
+    it('locks for longer each time, and starts afresh after the right passphrase', async () => {
+      const t = track(setup({ options: { maxPassphraseFailures: 1, lockoutMs: 15 * MIN } }));
+      await t.start();
+
+      await t.send('/now', 'wrong-one-1');
+      expect(t.said().at(-1)).toContain('🔒 Changes are now locked for 15 min.');
+      await t.clock.advanceBy(15 * MIN);
+      await t.send('/now', 'wrong-one-2');
+      expect(t.said().at(-1)).toContain('🔒 Changes are now locked for 30 min.');
+      await t.clock.advanceBy(29 * MIN);
+      await t.send('/now');
+      expect(t.said().at(-1)).toBe('🔒 Changes are locked for another 60 s after too many wrong passphrases. /now was not run.');
+      await t.clock.advanceBy(MIN);
+      await t.send('/now', PASS);
+      expect(t.nowRun).toHaveBeenCalledOnce();
+      await t.send('/now', 'wrong-one-3');
+      expect(t.said().at(-1)).toContain('🔒 Changes are now locked for 15 min.');
+      expect(t.audit.ofType('command.locked').map((e) => e.until)).toEqual([
+        new Date(START.getTime() + 15 * MIN).toISOString(),
+        new Date(START.getTime() + 45 * MIN).toISOString(),
+        new Date(START.getTime() + 60 * MIN).toISOString(),
+      ]);
+    });
+
     it('only counts recent failures towards the lock', async () => {
       const t = track(setup({ options: { maxPassphraseFailures: 3, passphraseFailureWindowMs: 15 * MIN } }));
       await t.start();
@@ -398,7 +445,7 @@ describe('CommandBot conversations', () => {
   });
 
   describe('unexpected answers', () => {
-    it.each(['maybe', 'yes please', 'sure', '👍', 'resume', 'discard'])('asks again after %j, then gives up', async (answer) => {
+    it.each(['maybe', 'sure', '👍', 'resume', 'discard'])('asks again after %j, then gives up', async (answer) => {
       const t = track(setup({ options: { maxInvalidAnswers: 3 } }));
       await t.start();
 
@@ -415,6 +462,18 @@ describe('CommandBot conversations', () => {
       expect(t.bot.pendingConversation).toBeUndefined();
       expect(t.pauseRun).not.toHaveBeenCalled();
       expect(t.handled()).toEqual([expect.objectContaining({ outcome: 'aborted' })]);
+    });
+
+    it('deletes any long answer that fits nothing in a change (it could be the passphrase), never looking at what it is', async () => {
+      const t = track(setup());
+      await t.start();
+
+      const [, a] = await t.send('/pause', 'yes please');
+      const [b] = await t.send(PASS);
+
+      expect(t.fake.deleted).toEqual([a?.message?.message_id, b?.message?.message_id]); // the same for both
+      expect(t.said().at(-1)).toBe(t.said().at(-2));
+      expect(t.pauseRun).not.toHaveBeenCalled();
     });
 
     it('still accepts a valid answer after an unexpected one', async () => {
@@ -495,7 +554,7 @@ describe('CommandBot conversations', () => {
 
       expect(t.fake.deleted).toEqual([early?.message?.message_id]);
       expect(t.said().at(-1)).toBe(
-        '🔐 I deleted your message because it contained the passphrase. Answer this question first; I ask for the passphrase after it. ' +
+        '🔐 I deleted your message in case it was the passphrase. Answer this question first; the passphrase comes last. ' +
           'Reply yes to pause, or cancel.',
       );
       expect(t.pauseRun).not.toHaveBeenCalled();
@@ -503,6 +562,32 @@ describe('CommandBot conversations', () => {
       await t.send('yes', PASS);
       expect(t.pauseRun).toHaveBeenCalledOnce();
       expectNoLeak(t);
+    });
+  });
+
+  describe('answer rate limit', () => {
+    it('ignores answers beyond the limit (saying so once), then takes them again', async () => {
+      const t = track(setup({ options: { maxAnswersPerWindow: 5, rateWindowMs: 60 * SEC, maxInvalidAnswers: 100 } }));
+      await t.start();
+
+      await t.send('/resume');
+      await t.send(...Array.from({ length: 8 }, () => 'hmm'));
+
+      expect(t.said().filter((x) => x.startsWith('🤔'))).toHaveLength(5);
+      expect(t.replies).toEqual(['🐢 Too many answers; ignoring them for up to 60 s.']);
+      await t.clock.advanceBy(60 * SEC);
+      await t.send('continue', PASS);
+      expect(t.resumeRun).toHaveBeenCalledWith('continue');
+    });
+
+    it('counts only answers, not other people chatting', async () => {
+      const t = track(setup({ policy: GROUP, options: { maxAnswersPerWindow: 2 } }));
+      await t.start();
+
+      await t.send(['/pause', inGroup(OWNER)], ...Array.from({ length: 10 }, () => ['chat', inGroup(FAMILY)] as Parameters<typeof t.msg>));
+      await t.send(['yes', inGroup(OWNER)], [PASS, inGroup(OWNER)]);
+
+      expect(t.pauseRun).toHaveBeenCalledOnce();
     });
   });
 
@@ -660,14 +745,16 @@ describe('CommandBot conversations', () => {
       expect(t.said()).toHaveLength(1); // just the question
     });
 
-    it("deletes the passphrase even when it's someone else who sends it", async () => {
+    it("never compares someone else's message with the passphrase (nothing is deleted, nothing said)", async () => {
       const t = track(setup({ policy: GROUP }));
       await t.start();
 
       await t.send(['/pause', inGroup(OWNER)], ['yes', inGroup(OWNER)]);
-      const [leak] = await t.send([PASS, inGroup(FAMILY)]);
+      const before = t.said().length;
+      await t.send([PASS, inGroup(FAMILY)]);
 
-      expect(t.fake.deleted).toEqual([leak?.message?.message_id]);
+      expect(t.fake.deleted).toEqual([]);
+      expect(t.said()).toHaveLength(before);
       expect(t.pauseRun).not.toHaveBeenCalled();
       expect(t.bot.pendingConversation).toEqual({ command: 'pause', userId: OWNER.id });
     });
@@ -699,8 +786,17 @@ describe('CommandBot conversations', () => {
 
       expect(t.pauseRun).not.toHaveBeenCalled();
       expect(t.fake.deleted).toEqual([stale?.message?.message_id]);
-      expect(t.said().at(-1)).toBe('🔐 I deleted your message because it contained the passphrase. It was too old to act on; nothing was run.');
+      expect(t.said().at(-1)).toBe('🔐 Your message was too old to act on; nothing was run. I deleted your message in case it was the passphrase.');
       expectNoLeak(t);
+    });
+
+    it('leaves a stale message alone when no passphrase was asked for', async () => {
+      const t = track(setup());
+      await t.start();
+      const [stale] = await t.send([PASS, { date: Math.floor(START.getTime() / 1000) - 600 }]);
+
+      expect(t.fake.deleted).not.toContain(stale?.message?.message_id);
+      expect(t.said()).toEqual([]);
     });
 
     it('ignores a stranger typing the passphrase (never even compared), and records nothing', async () => {
@@ -716,40 +812,73 @@ describe('CommandBot conversations', () => {
     });
   });
 
-  describe('the passphrase in the wrong place', () => {
-    it('deletes a command that carries it, and starts nothing', async () => {
+  describe('the passphrase is never a guessing oracle', () => {
+    /**
+     * If the bot deleted messages that contain the passphrase, an attacker holding an allowed account could
+     * send thousands of guesses and watch which message disappears, without ever touching the lockout. So
+     * outside the passphrase question, the passphrase is never compared with anything: a message holding it
+     * must be treated exactly like one that doesn't.
+     */
+    const behaviour = async (text: string) => {
+      const t = track(setup());
+      await t.start();
+      await t.send(text);
+      return { deleted: t.fake.deleted.length, said: t.said(), replies: t.replies, audit: t.audit.events.map((e) => e.type) };
+    };
+
+    it.each([
+      (p: string) => p,
+      (p: string) => `btw the passphrase is ${p}`,
+      (p: string) => Array.from({ length: 50 }, (_, i) => `guess${i}`).concat(p).join(' '),
+      (p: string) => `${p.toUpperCase()} ${p}`,
+    ])('treats an ordinary message holding the passphrase like any other (%#)', async (make) => {
+      expect(await behaviour(make(PASS))).toEqual(await behaviour(make('not the passphrase!')));
+      expect((await behaviour(make(PASS))).deleted).toBe(0);
+    });
+
+    it('treats a read-only command holding it like any other', async () => {
+      expect(await behaviour(`/status ${PASS}`)).toEqual(await behaviour('/status not-the-passphrase'));
+    });
+
+    it('deletes a right and a wrong passphrase at the passphrase question alike (and only the wrong one counts)', async () => {
       const t = track(setup());
       await t.start();
 
-      const [cmd] = await t.send(`/pause ${PASS}`);
+      const [, wrong] = await t.send('/now', 'not-the-passphrase');
+      const [, right] = await t.send('/now', PASS);
 
-      expect(t.fake.deleted).toEqual([cmd?.message?.message_id]);
-      expect(t.replies).toEqual([
-        "⚠️ /pause was not run. 🔐 I deleted your message because it contained the passphrase. Send the command alone; I ask for the passphrase when it's needed.",
-      ]);
+      expect(t.fake.deleted).toEqual([wrong?.message?.message_id, right?.message?.message_id]);
+      expect(t.audit.ofType('command.auth_failed')).toHaveLength(1);
+    });
+
+    it('deletes text after a change command if it could be the passphrase, whatever it is, and starts nothing', async () => {
+      const t = track(setup());
+      await t.start();
+
+      const [a] = await t.send(`/pause ${PASS}`);
+      const [b] = await t.send('/pause not-the-passphrase');
+      const [c] = await t.send('/pause now'); // too short to be one: left alone
+
+      expect(t.fake.deleted).toEqual([a?.message?.message_id, b?.message?.message_id]);
+      expect(t.fake.deleted).not.toContain(c?.message?.message_id);
+      expect(t.replies[0]).toBe(
+        "⚠️ /pause takes no arguments. Send it alone; I ask for the passphrase when it's needed. I deleted your message in case it was the passphrase.",
+      );
+      expect(t.replies[1]).toBe(t.replies[0]);
+      expect(t.replies[2]).toBe('⚠️ /pause takes no arguments.');
       expect(t.bot.pendingConversation).toBeUndefined();
       expect(t.pauseRun).not.toHaveBeenCalled();
       expectNoLeak(t);
     });
 
-    it('deletes it from an ordinary message, and says so', async () => {
+    it('says when it could not delete something that could be the passphrase', async () => {
       const t = track(setup());
+      t.fake.api.deleteMessage.mockRejectedValue(new Error("Telegram deleteMessage failed: 400 Bad Request: message can't be deleted"));
       await t.start();
 
-      const [m] = await t.send(`btw the passphrase is ${PASS}`);
+      await t.send(`/pause ${PASS}`);
 
-      expect(t.fake.deleted).toEqual([m?.message?.message_id]);
-      expect(t.said()).toEqual(['🔐 I deleted your message because it contained the passphrase. Nothing was waiting for it, so nothing was run.']);
-    });
-
-    it('says when it could not delete it', async () => {
-      const t = track(setup());
-      t.fake.api.deleteMessage.mockRejectedValue(new Error('Telegram deleteMessage failed: 400 Bad Request: message can\'t be deleted'));
-      await t.start();
-
-      await t.send(`the passphrase is ${PASS}`);
-
-      expect(t.said()[0]).toMatch(/^⚠️ Your message contains the passphrase and I couldn't delete it .*please delete it yourself\./);
+      expect(t.replies[0]).toMatch(/⚠️ I couldn't delete your message \(in a group I need the “Delete messages” admin right\): please delete it yourself, in case it was the passphrase\.$/);
     });
   });
 
@@ -788,20 +917,21 @@ describe('CommandBot conversations', () => {
 
     it('reports a failing choice', async () => {
       const t = track(setup());
-      vi.mocked(t.pause.begin).mockReturnValueOnce({
-        kind: 'ask',
-        text: 'Pause?',
-        hint: 'yes or cancel',
-        choices: [
-          {
-            words: ['yes'],
-            label: 'yes',
-            next: () => {
-              throw new Error('boom');
+      vi.mocked(t.pause.begin).mockReturnValueOnce(
+        ask({
+          text: 'Pause?',
+          hint: 'yes or cancel',
+          choices: [
+            {
+              words: ['yes'],
+              label: 'yes',
+              next: () => {
+                throw new Error('boom');
+              },
             },
-          },
-        ],
-      });
+          ],
+        }),
+      );
       await t.start();
 
       await t.send('/pause', 'yes');
@@ -1039,17 +1169,15 @@ describe('CommandBot conversations', () => {
       expect(t.bot.pendingConversation).toBeUndefined();
     });
 
-    it('never acts on a command carrying the passphrase, even one that accepts arguments', async () => {
+    it('passes arguments to a read-only command without ever comparing them with the passphrase', async () => {
       const t = setupWith();
       active.push(t.bot);
       await t.start();
 
-      const [cmd] = await t.send(`/browse ${PASS}`);
+      await t.send(`/browse ${PASS}`);
 
-      expect(t.browse.command.begin).not.toHaveBeenCalled();
-      expect(t.fake.deleted).toEqual([cmd?.message?.message_id]);
-      expect(t.replies[0]).toMatch(/^⚠️ \/browse was not run\. 🔐 I deleted your message/);
-      expectNoLeak(t);
+      expect(t.browse.command.begin).toHaveBeenCalledWith(expect.anything(), PASS);
+      expect(t.fake.deleted).toEqual([]);
     });
 
     it('asks again, saying why, when a free-form answer is refused; gives up after too many', async () => {
@@ -1098,7 +1226,7 @@ describe('CommandBot conversations', () => {
       expect(t.bot.pendingConversation).toBeUndefined();
     });
 
-    it('never passes a message with the passphrase to a free-form question: it is deleted and asked again', async () => {
+    it('deletes a long answer to a free-form question of a change that it cannot read (it could be the passphrase)', async () => {
       const t = setupWith();
       active.push(t.bot);
       await t.start();
@@ -1107,9 +1235,22 @@ describe('CommandBot conversations', () => {
       const [leak] = await t.send(`my pass: ${PASS}`);
 
       expect(t.fake.deleted).toEqual([leak?.message?.message_id]);
-      expect(t.said().at(-1)).toMatch(/^🔐 I deleted your message because it contained the passphrase\. Answer this question first/);
+      expect(t.said().at(-1)).toBe(
+        '⚠️ That is not a number from 1 to 9. 🔐 I deleted your message in case it was the passphrase. Answer this question first; the passphrase comes last. ' +
+          'Reply a number from 1 to 9.',
+      );
       expect(t.bot.pendingConversation).toEqual({ command: 'tune', userId: OWNER.id });
       expectNoLeak(t);
+    });
+
+    it('never deletes answers while browsing (read-only: the passphrase has no business there)', async () => {
+      const t = setupWith();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/browse', 'not a valid answer at all', PASS);
+
+      expect(t.fake.deleted).toEqual([]);
     });
 
     it('runs a mutable change after a free-form answer and the passphrase', async () => {

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -79,6 +79,16 @@ describe('FileStateStore', () => {
       alerts: {},
     });
     expect(await readdir(dir)).toEqual(['state.json']);
+  });
+
+  it('never writes through a symlink planted at the state file', async () => {
+    const victim = join(dir, 'victim.txt');
+    await writeFile(victim, 'IMPORTANT');
+    await symlink(victim, path);
+
+    await new FileStateStore(path).save({ history: new WateringHistory(), sequences: [], alerts: {} });
+
+    expect(await readFile(victim, 'utf8')).toBe('IMPORTANT');
   });
 
   it('remembers a pause across restarts', async () => {

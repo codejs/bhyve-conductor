@@ -15,11 +15,9 @@ import { FileAuditLog, lastAuditEvent, readAuditTail, teeAudit, type AuditSink }
 import { BhyveClient } from './bhyve/client.ts';
 import { commandPolicy } from './bot/auth.ts';
 import { CommandBot } from './bot/bot.ts';
-import { buildAuditCommand } from './bot/audit-command.ts';
-import { buildCommands, zonesBySensor } from './bot/commands.ts';
-import { buildConfigCommand } from './bot/config-command.ts';
-import { buildControlCommands } from './bot/control.ts';
-import { passphraseProblem } from './bot/conversation.ts';
+import { zonesBySensor } from './bot/commands.ts';
+import { passphraseProblem } from './bot/gate.ts';
+import { buildBotCommands } from './bot/registry.ts';
 import { assertForecastReady, loadConductorConfig } from './conductor/config.ts';
 import { ConfigEditor } from './conductor/config-editor.ts';
 import { Monitor } from './conductor/monitor.ts';
@@ -84,6 +82,8 @@ const main = async (): Promise<void> => {
     log.warn('TELEGRAM_COMMAND_USER_IDS is set but TELEGRAM_COMMANDS is off: Telegram commands are disabled');
   }
   const passphrase = env.TELEGRAM_COMMAND_PASSPHRASE;
+  // Nothing else needs it: keep it out of the environment (child processes, crash reports, debug dumps).
+  delete process.env.TELEGRAM_COMMAND_PASSPHRASE;
   if (passphrase !== undefined) {
     // The message never contains the passphrase itself.
     const problem = passphraseProblem(passphrase);
@@ -162,7 +162,7 @@ const main = async (): Promise<void> => {
   let bot: CommandBot | undefined;
   if (policy && telegram && queue && !args.once) {
     const q = queue;
-    const commands = buildCommands({
+    const commands = buildBotCommands({
       // Only the read-only call is handed over, so no chat message can ever reach a watering command.
       bhyve: { getDevices: () => bhyve.getDevices() },
       // Its own source, so a command's read can't interfere with the monitor's (same Tuya client and token).
@@ -170,28 +170,19 @@ const main = async (): Promise<void> => {
       zonesBySensor: zonesBySensor(config.zones),
       status: () => monitor.status(),
       timeZone: config.notifications.timeZone,
+      readAudit: () => readAuditTail(env.CONDUCTOR_AUDIT, AUDIT_TAIL_BYTES),
+      // Changes only exist with a passphrase (the bot refuses them without one anyway). They get just the
+      // three monitor calls they need, and an editor of `config`: the very object the monitor runs with.
+      ...(passphrase === undefined
+        ? {}
+        : {
+            changes: {
+              control: { status: () => monitor.status(), pause: (by) => monitor.pause(by), resume: (by, held) => monitor.resume(by, held) },
+              editor: new ConfigEditor({ path: env.CONDUCTOR_CONFIG, config, audit }),
+            },
+          }),
     });
-    const auditCommand = buildAuditCommand({
-      read: () => readAuditTail(env.CONDUCTOR_AUDIT, AUDIT_TAIL_BYTES),
-      timeZone: config.notifications.timeZone,
-    });
-    // Changes only exist with a passphrase; the bot refuses mutable commands without one anyway.
-    const changes =
-      passphrase === undefined
-        ? []
-        : [
-            ...buildControlCommands({ control: monitor, timeZone: config.notifications.timeZone }),
-            // Edits conductor.json, and the zones of `config`: the very object the monitor runs with.
-            buildConfigCommand({ editor: new ConfigEditor({ path: env.CONDUCTOR_CONFIG, config, audit }) }),
-          ];
-    bot = new CommandBot({
-      api: telegram,
-      policy,
-      commands: [...commands, auditCommand, ...changes],
-      passphrase,
-      reply: (html) => q.enqueue(html),
-      audit,
-    });
+    bot = new CommandBot({ api: telegram, policy, commands, passphrase, reply: (html) => q.enqueue(html), audit });
   } else if (policy && args.once) {
     log.info('Telegram commands are only answered by the continuously running service (not with --once)');
   }

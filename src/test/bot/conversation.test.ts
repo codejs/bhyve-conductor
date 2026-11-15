@@ -1,6 +1,7 @@
 import { inspect } from 'node:util';
-import { describe, expect, it } from 'vitest';
-import { actorName, ANSWER_WORDS, CANCEL_WORDS, normalizeAnswer, Passphrase, passphraseProblem, YES_WORDS } from '../../bot/conversation.ts';
+import { describe, expect, it, vi } from 'vitest';
+import { actorName, ANSWER_WORDS, ask, CANCEL_WORDS, confirm, done, normalizeAnswer, passphraseStep, via, YES_WORDS, type Step } from '../../bot/conversation.ts';
+import { Passphrase, passphraseProblem } from '../../bot/gate.ts';
 
 const SECRET = 'correct horse battery';
 
@@ -74,11 +75,8 @@ describe('Passphrase', () => {
     expect(p.matches('x'.repeat(100_000))).toBe(false);
   });
 
-  it('finds it inside other text', () => {
-    const p = new Passphrase(SECRET);
-    expect(p.occursIn(`/pause ${SECRET}`)).toBe(true);
-    expect(p.occursIn(`my pass is ${SECRET}!`)).toBe(true);
-    expect(p.occursIn('correct horse')).toBe(false);
+  it('cannot be searched for in other text (that would make deleting messages a guessing oracle)', () => {
+    expect('occursIn' in new Passphrase(SECRET)).toBe(false);
   });
 
   it('refuses an unusable passphrase with a message that does not contain it', () => {
@@ -96,5 +94,66 @@ describe('Passphrase', () => {
     expect(`${p}`).toBe('[passphrase]');
     expect(JSON.stringify({ p })).toBe('{"p":"[passphrase]"}');
     expect(inspect(p, { showHidden: true, depth: 5 })).not.toContain('horse');
+  });
+});
+
+describe('step builders', () => {
+  const read = async (step: Step, answer: string) => {
+    if (step.kind !== 'input') throw new Error(step.kind);
+    return step.read(answer);
+  };
+
+  it('done', () => {
+    expect(done('bye')).toEqual({ kind: 'done', text: 'bye' });
+  });
+
+  it('ask: picks a choice by any of its words (forgiving case and punctuation), and says which', async () => {
+    const next = vi.fn(() => done('picked'));
+    const step = ask({ text: 'Which?', hint: 'Reply a or b.', choices: [{ words: ['a', '1'], label: 'first', next }, { words: ['b'], label: 'second', next: () => done('b') }] });
+
+    expect(step).toMatchObject({ kind: 'input', text: 'Which?', hint: 'Reply a or b.' });
+    expect(await read(step, ' A! ')).toEqual({ next: done('picked'), choice: 'first' });
+    expect(await read(step, '1')).toEqual({ next: done('picked'), choice: 'first' });
+    expect(await read(step, 'b')).toEqual({ next: done('b'), choice: 'second' });
+  });
+
+  it('ask: anything else is not understood (without saying what was typed)', async () => {
+    const step = ask({ text: 'Which?', hint: 'h', choices: [{ words: ['a'], label: 'a', next: () => done('a') }] });
+    expect(await read(step, 'c')).toEqual({});
+    expect(await read(step, 'a please')).toEqual({});
+  });
+
+  it('ask: works out the next step only when chosen', async () => {
+    const next = vi.fn(() => done('x'));
+    const step = ask({ text: 'Q', hint: 'h', choices: [{ words: ['a'], label: 'a', next }] });
+    await read(step, 'nope?');
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('confirm: yes (or y, ok, confirm) goes on', async () => {
+    const step = confirm({ text: 'Sure?', hint: 'yes or cancel', then: () => done('go') });
+    for (const word of YES_WORDS) expect(await read(step, word)).toEqual({ next: done('go'), choice: 'yes' });
+    expect(await read(confirm({ text: 'Sure?', hint: 'h', label: 'discard', then: () => done('go') }), 'yes')).toMatchObject({ choice: 'discard' });
+    expect(await read(step, 'sure')).toEqual({});
+  });
+
+  it('passphraseStep', async () => {
+    const run = vi.fn(async () => 'ran');
+    expect(passphraseStep({ action: 'pause', run })).toEqual({ kind: 'passphrase', text: '🔐 Send the passphrase to pause, or <b>cancel</b>.', run });
+    expect(passphraseStep({ intro: 'Sure?\n', action: 'save', run }).text).toBe('Sure?\n🔐 Send the passphrase to save, or <b>cancel</b>.');
+  });
+
+  it('via', () => {
+    expect(via({ id: 1, username: 'owner' })).toBe('@owner via Telegram');
+    expect(via({ id: 7 })).toBe('user 7 via Telegram');
+  });
+});
+
+describe('normalizeAnswer on hostile input', () => {
+  it('takes linear time on a long run of punctuation (no regex backtracking)', () => {
+    const started = performance.now();
+    expect(normalizeAnswer(`${'.'.repeat(200_000)}x`)).toHaveLength(200_001);
+    expect(normalizeAnswer(`x${'!'.repeat(200_000)}`)).toBe('x');
+    expect(performance.now() - started).toBeLessThan(200);
   });
 });

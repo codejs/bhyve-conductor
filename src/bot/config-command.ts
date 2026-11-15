@@ -1,7 +1,6 @@
 import type { ConfigCheck, ConfigEditor, RuleChange, RuleChanges, ZoneSettings } from '../conductor/config-editor.ts';
 import { zoneRuleProblem, type EditableZoneRule } from '../conductor/config.ts';
-import { via } from './control.ts';
-import type { Actor, InputResult, MutableCommand, Step } from './conversation.ts';
+import { ask, done, passphraseStep, via, type Actor, type InputResult, type MutableCommand, type Step } from './conversation.ts';
 import { duration, fitLines, safe } from './format.ts';
 
 /**
@@ -76,7 +75,7 @@ export const buildConfigCommand = ({ editor }: ConfigCommandDeps): MutableComman
   description: "Change a zone's watering settings (asks for the passphrase)",
   begin: (actor) => {
     const zones = editor.zones();
-    if (zones.length === 0) return { kind: 'done', text: 'No zones are configured.' };
+    if (zones.length === 0) return done('No zones are configured.');
     const only = zones[0];
     if (zones.length === 1 && only) return walk(editor, actor, only);
     return {
@@ -112,7 +111,7 @@ const walk = (editor: ConfigCommandDeps['editor'], actor: Actor, zone: ZoneSetti
 
   const field = (i: number, intro = ''): Step => {
     const f = FIELDS[i] ?? FIELDS[0];
-    if (!f) return { kind: 'done', text: 'Nothing to change.' };
+    if (!f) return done('Nothing to change.');
     const changed = pending[f.key] !== undefined ? ` (was ${show(zone.values[f.key], f.unit)})` : '';
     return {
       kind: 'input',
@@ -138,8 +137,7 @@ const walk = (editor: ConfigCommandDeps['editor'], actor: Actor, zone: ZoneSetti
   const summary = async (): Promise<Step> => {
     const check: ConfigCheck = await editor.preview(zone.key, { ...pending });
     if (!check.ok && check.reason === 'invalid') {
-      return {
-        kind: 'ask',
+      return ask({
         text: fitLines([
           "⚠️ <b>These values don't fit together:</b>",
           ...check.problems.map((p) => `• ${safe(p)}`),
@@ -148,25 +146,21 @@ const walk = (editor: ConfigCommandDeps['editor'], actor: Actor, zone: ZoneSetti
         ]),
         hint: 'Reply edit or cancel.',
         choices: [{ words: ['edit'], label: 'edit', next: () => field(0) }],
-      };
+      });
     }
-    if (!check.ok) {
-      return { kind: 'done', text: fitLines(["⚠️ The settings can't be changed right now:", ...check.problems.map((p) => `• ${safe(p)}`), 'Nothing changed.']) };
-    }
-    if (check.changes.length === 0) return { kind: 'done', text: `⚙️ No changes for ${safe(zone.name)}: nothing was saved.` };
+    if (!check.ok) return done(fitLines(["⚠️ The settings can't be changed right now:", ...check.problems.map((p) => `• ${safe(p)}`), 'Nothing changed.']));
+    if (check.changes.length === 0) return done(`⚙️ No changes for ${safe(zone.name)}: nothing was saved.`);
     const more = moreWater(check.changes);
     const changes = { ...pending };
-    return {
-      kind: 'passphrase',
-      text: fitLines([
+    return passphraseStep({
+      intro: `${fitLines([
         `⚙️ <b>${safe(zone.name)}</b>: changes to save`,
         ...check.changes.map(formatChange),
         ...(more.length > 0 ? ['', `💧 <b>More watering</b>: ${more.join(', ')}.`] : []),
         '',
         'They are saved to conductor.json and used from the next poll. Watering already under way keeps its plan.',
-        '',
-        '🔐 Send the passphrase to save, or <b>cancel</b>.',
-      ]),
+      ])}\n\n`,
+      action: 'save',
       run: async () => {
         const result = await editor.apply(zone.key, changes, via(actor));
         if (!result.ok) {
@@ -176,7 +170,7 @@ const walk = (editor: ConfigCommandDeps['editor'], actor: Actor, zone: ZoneSetti
         if (result.changes.length === 0) return `⚙️ No changes for ${safe(zone.name)}: nothing was saved.`;
         return fitLines([`✅ <b>Saved</b> for ${safe(zone.name)}:`, ...result.changes.map(formatChange), '', 'Used from the next poll.']);
       },
-    };
+    });
   };
 
   return field(0, current);

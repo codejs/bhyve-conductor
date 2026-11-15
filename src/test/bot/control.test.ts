@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildControlCommands, formatPaused, formatResumed, type ConductorControl } from '../../bot/control.ts';
-import type { Choice, MutableCommand, Step } from '../../bot/conversation.ts';
+import type { MutableCommand, Step } from '../../bot/conversation.ts';
 import type { ConductorStatus, PauseResult, ResumeResult, SequenceStatus } from '../../conductor/monitor.ts';
 import { minutesAgo, NOW } from '../utils/conductor.ts';
 
@@ -49,11 +49,16 @@ const setup = (s: ConductorStatus = status()) => {
 };
 
 const begin = async (c: MutableCommand) => c.begin(OWNER, '');
+/** Answers a question; returns the next step and what was chosen, or undefined if the answer isn't understood. */
+const answer = async (step: Step, word: string): Promise<{ next: Step; choice?: string } | undefined> => {
+  if (step.kind !== 'input') throw new Error(`expected a question, got ${step.kind}`);
+  const result = await step.read(word);
+  return 'next' in result ? result : undefined;
+};
 const choose = async (step: Step, word: string): Promise<Step> => {
-  if (step.kind !== 'ask') throw new Error(`expected a question, got ${step.kind}`);
-  const choice = step.choices.find((c: Choice) => c.words.includes(word));
-  if (!choice) throw new Error(`no choice for ${word}`);
-  return choice.next();
+  const result = await answer(step, word);
+  if (!result) throw new Error(`no choice for ${word}`);
+  return result.next;
 };
 const run = async (step: Step): Promise<string> => {
   if (step.kind !== 'passphrase') throw new Error(`expected the passphrase step, got ${step.kind}`);
@@ -102,8 +107,8 @@ describe('control commands', () => {
       );
       const step = await begin(t.pause);
 
-      expect(step.kind).toBe('ask');
-      if (step.kind !== 'ask') return;
+      expect(step.kind).toBe('input');
+      if (step.kind !== 'input') return;
       expect(step.text).toBe(
         [
           '⚠️ <b>Watering in progress</b>',
@@ -117,7 +122,8 @@ describe('control commands', () => {
         ].join('\n'),
       );
       expect(step.hint).toBe('Reply yes to pause, or cancel.');
-      expect(step.choices.map((c) => [c.label, c.words])).toEqual([['yes', ['yes', 'y', 'confirm', 'ok']]]);
+      for (const word of ['yes', 'Y', 'ok!', 'confirm']) expect(await answer(step, word)).toMatchObject({ choice: 'yes', next: { kind: 'passphrase' } });
+      for (const word of ['maybe', 'continue', 'yes please']) expect(await answer(step, word)).toBeUndefined();
 
       const next = await choose(step, 'yes');
       expect(next).toMatchObject({ kind: 'passphrase', text: '🔐 Send the passphrase to pause, or <b>cancel</b>.' });
@@ -128,7 +134,9 @@ describe('control commands', () => {
 
     it('asks to confirm when only water from a finished sequence is still on', async () => {
       const t = setup(status({ wateringNow: [{ deviceId: 'dev1', zoneNames: ['Front'], cycle: 3, of: 3, until: new Date(NOW.getTime() + MIN) }] }));
-      expect((await begin(t.pause)).kind).toBe('ask');
+      const step = await begin(t.pause);
+      expect(step.kind).toBe('input');
+      expect(step.text).toMatch(/^⚠️ <b>Watering in progress<\/b>/);
     });
 
     it('when already paused: says so, without asking for the passphrase', async () => {
@@ -175,8 +183,8 @@ describe('control commands', () => {
       const t = setup(status({ paused, sequences: [sequence()] }));
       const step = await begin(t.resume);
 
-      expect(step.kind).toBe('ask');
-      if (step.kind !== 'ask') return;
+      expect(step.kind).toBe('input');
+      if (step.kind !== 'input') return;
       expect(step.text).toBe(
         [
           'Paused since Jul 1, 11:15 by @owner via Telegram.',
@@ -190,11 +198,10 @@ describe('control commands', () => {
         ].join('\n'),
       );
       expect(step.hint).toBe('Reply continue, discard or cancel.');
-      expect(step.choices.map((c) => [c.label, c.words])).toEqual([
-        ['continue', ['continue', '1']],
-        ['discard', ['discard', '2']],
-      ]);
-      expect(step.choices.some((c) => c.words.includes('yes'))).toBe(false); // "yes" would be ambiguous here
+      for (const [word, choice] of [['continue', 'continue'], ['1', 'continue'], ['discard', 'discard'], ['2', 'discard']]) {
+        expect(await answer(step, word ?? '')).toMatchObject({ choice });
+      }
+      expect(await answer(step, 'yes')).toBeUndefined(); // "yes" would be ambiguous here
     });
 
     it.each([
@@ -222,8 +229,8 @@ describe('control commands', () => {
       const t = setup(status({ paused, sequences: [sequence({ stale: true, dueAt: minutesAgo(200) })] }));
       const step = await begin(t.resume);
 
-      expect(step.kind).toBe('ask');
-      if (step.kind !== 'ask') return;
+      expect(step.kind).toBe('input');
+      if (step.kind !== 'input') return;
       expect(step.text).toBe(
         [
           'Paused since Jul 1, 11:15 by @owner via Telegram.',

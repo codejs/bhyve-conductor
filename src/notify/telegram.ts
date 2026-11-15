@@ -43,7 +43,11 @@ const User = z.object({
   id: z.number().int(),
   is_bot: z.boolean(),
   first_name: z.string().optional(),
-  username: z.string().optional(),
+  /**
+   * Telegram usernames are 5–32 letters, digits and underscores. Anything else is dropped rather than
+   * trusted: it ends up in messages, logs and the audit trail.
+   */
+  username: z.string().regex(/^[A-Za-z0-9_]{1,64}$/).optional().catch(undefined),
 });
 
 /**

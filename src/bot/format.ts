@@ -42,6 +42,9 @@ export const fitLines = (lines: readonly string[], max = MAX_REPLY_CHARS): strin
   return out.join('\n');
 };
 
+/** What is being watered: the zone names, or the device id if they aren't known. Escaped. */
+export const where = (zoneNames: readonly string[], deviceId: string): string => safe(zoneNames.length > 0 ? zoneNames.join(', ') : deviceId);
+
 /** "Jul 1, 14:05" in the given time zone (default: this machine's). */
 export const shortTime = (d: Date, timeZone?: string): string =>
   new Intl.DateTimeFormat('en-US', {
@@ -180,18 +183,16 @@ export const formatStatus = (s: ConductorStatus, timeZone?: string): string => {
   if (s.sequences.length > 0) {
     lines.push('', s.paused ? '<b>Watering on hold</b>' : '<b>Watering in progress</b>');
     for (const q of s.sequences) {
-      const who = q.zoneNames.length > 0 ? q.zoneNames.join(', ') : q.deviceId;
       const when = q.dueAt.getTime() > s.at.getTime() ? `due ${at(q.dueAt)}` : s.paused ? `due since ${at(q.dueAt)}` : 'due now';
       const retry = q.attempts > 0 ? `, ${q.attempts} failed attempt(s)` : '';
       const stale = s.paused && q.stale ? ', too late to continue' : '';
-      lines.push(`${s.paused ? '⏸️' : '💧'} ${safe(who)}: cycle ${q.nextCycle}/${q.cycles} ${when}${retry}${stale}`);
+      lines.push(`${s.paused ? '⏸️' : '💧'} ${where(q.zoneNames, q.deviceId)}: cycle ${q.nextCycle}/${q.cycles} ${when}${retry}${stale}`);
     }
   }
   if (s.wateringNow.length > 0) {
     lines.push('', '<b>Water on now</b>');
     for (const w of s.wateringNow) {
-      const who = w.zoneNames.length > 0 ? w.zoneNames.join(', ') : w.deviceId;
-      lines.push(`💧 ${safe(who)}: cycle ${w.cycle}/${w.of} until ${at(w.until)}`);
+      lines.push(`💧 ${where(w.zoneNames, w.deviceId)}: cycle ${w.cycle}/${w.of} until ${at(w.until)}`);
     }
   }
 

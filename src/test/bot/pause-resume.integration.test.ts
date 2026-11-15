@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot } from '../../bot/bot.ts';
-import { buildCommands, zonesBySensor } from '../../bot/commands.ts';
-import { buildControlCommands } from '../../bot/control.ts';
+import { zonesBySensor } from '../../bot/commands.ts';
+import { buildBotCommands } from '../../bot/registry.ts';
 import { VirtualClock } from '../../clock.ts';
 import type { ConductorConfig, ZoneConfig } from '../../conductor/config.ts';
+import { ConfigEditor } from '../../conductor/config-editor.ts';
 import { WateringHistory } from '../../conductor/history.ts';
 import { Monitor } from '../../conductor/monitor.ts';
 import type { ConductorState } from '../../conductor/state.ts';
@@ -52,8 +53,9 @@ const setup = (saved?: ConductorState, clock = new VirtualClock(NOW)) => {
       state = { history: new WateringHistory([...s.history.runs]), sequences: structuredClone(s.sequences), alerts: { ...s.alerts }, ...(s.paused ? { paused: { ...s.paused } } : {}) };
     }),
   };
+  const monitorConfig = config();
   const monitor = new Monitor({
-    config: config(),
+    config: monitorConfig,
     source,
     bhyve: fake.control,
     history: saved?.history ?? new WateringHistory(),
@@ -68,17 +70,20 @@ const setup = (saved?: ConductorState, clock = new VirtualClock(NOW)) => {
   const bot = new CommandBot({
     api: api.bot,
     policy: POLICY,
-    commands: [
-      ...buildCommands({
-        bhyve: { getDevices: () => fake.bhyve.getDevices() },
-        sensors: source,
-        zonesBySensor: zonesBySensor([FRONT]),
-        status: () => monitor.status(),
-        timeZone: 'UTC',
-        now: () => clock.now(),
-      }),
-      ...buildControlCommands({ control: monitor, timeZone: 'UTC' }),
-    ],
+    // Assembled exactly as index.ts does.
+    commands: buildBotCommands({
+      bhyve: { getDevices: () => fake.bhyve.getDevices() },
+      sensors: source,
+      zonesBySensor: zonesBySensor([FRONT]),
+      status: () => monitor.status(),
+      timeZone: 'UTC',
+      now: () => clock.now(),
+      readAudit: async () => ({ events: audit.events, skipped: 0, truncated: false }),
+      changes: {
+        control: { status: () => monitor.status(), pause: (by) => monitor.pause(by), resume: (by, held) => monitor.resume(by, held) },
+        editor: new ConfigEditor({ path: '/nonexistent/conductor.json', config: monitorConfig }),
+      },
+    }),
     passphrase: PASS,
     reply: (html) => replies.push(html),
     audit,

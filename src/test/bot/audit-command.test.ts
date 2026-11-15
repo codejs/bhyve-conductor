@@ -42,7 +42,7 @@ const input = (step: Step) => {
 /** Answers the step; returns the next step, or the reason the answer was refused. */
 const answer = async (step: Step, text: string): Promise<Step | string> => {
   const result: InputResult = await input(step).read(text);
-  return 'next' in result ? result.next : result.invalid;
+  return 'next' in result ? result.next : (result.invalid ?? 'not understood');
 };
 const next = async (step: Step, text: string): Promise<Step> => {
   const result = await answer(step, text);
@@ -89,9 +89,11 @@ describe('parseAuditQuery', () => {
     expect(result).toEqual({ problem: expect.stringContaining(problem) });
   });
 
-  it('does not echo a long word back in full', () => {
-    const result = parseAuditQuery('x'.repeat(200));
-    expect('problem' in result && result.problem.length).toBeLessThan(120);
+  it('never repeats what was typed (it could be something that should not be in the chat twice)', () => {
+    for (const text of ['secret-passphrase', 'secret-passphrase 7d', 'problems secret-passphrase', 'x'.repeat(200)]) {
+      const result = parseAuditQuery(text);
+      expect(JSON.stringify(result)).not.toMatch(/secret|xxxx/);
+    }
   });
 
   it('defaults to everything in the last 24 h', () => {
@@ -259,7 +261,7 @@ describe('/audit', () => {
   it('refuses anything else, saying why', async () => {
     const t = setup();
     const step = input(await t.begin());
-    expect(await answer(step, 'yesterday')).toMatch(/^"yesterday" is neither a view/);
+    expect(await answer(step, 'yesterday')).toBe('That is neither a view (all, problems, watering, commands, summary) nor a period like 7d.');
     expect(await answer(step, 'problems watering')).toBe('Give only one view.');
   });
 
@@ -268,7 +270,7 @@ describe('/audit', () => {
     const step = await t.begin('last week');
     expect(step).toEqual({
       kind: 'done',
-      text: '⚠️ "last" is neither a view (all, problems, watering, commands, summary) nor a period like 7d.\nFor example: /audit, /audit problems, /audit summary 7d.',
+      text: '⚠️ That is neither a view (all, problems, watering, commands, summary) nor a period like 7d.\nFor example: /audit, /audit problems, /audit summary 7d.',
     });
     expect(await t.begin('a b c')).toMatchObject({ kind: 'done', text: expect.stringMatching(/^⚠️ Give a view and\/or a period/) });
     expect(t.read).not.toHaveBeenCalled();
@@ -323,6 +325,17 @@ describe('/audit', () => {
     }
     expect(seen.size).toBe(40);
     expect(pages).toBeGreaterThan(5); // fewer than 8 events fit on a page
+  });
+
+  it('pages through a large trail cheaply (each query is worked out once, not on every answer)', async () => {
+    // The bot shares the event loop with the watering: paging must not hog it. (Worked out on every page,
+    // this took over 100 ms per answer for 10 000 events.)
+    const events = Array.from({ length: 10_000 }, (_, i) => ev((10_000 - i) * 8_000, 'poll.failed', { error: `error ${i}` }));
+    const t = setup(events);
+    let step: Step = await t.begin();
+    const started = performance.now();
+    for (let i = 0; i < 20; i++) step = await next(step, 'more');
+    expect((performance.now() - started) / 20).toBeLessThan(25);
   });
 
   it('escapes whatever is in the audit file (it can hold what strangers sent)', async () => {
