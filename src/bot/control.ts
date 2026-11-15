@@ -39,6 +39,15 @@ export const buildControlCommands = ({ control, timeZone }: ControlDeps): Mutabl
     kind: 'mutable',
     name: 'pause',
     description: 'Pause automatic watering (asks for the passphrase)',
+    help: {
+      usage: [{ call: '/pause', does: 'stops supplemental watering until /resume' }],
+      details: [
+        'If watering is in progress, it asks you to confirm first (reply yes), then asks for the passphrase.',
+        'Watering in progress is put on hold; water that is already on is not turned off (use the B-hyve app for that).',
+        'Sensors are still read and alerts still sent. Your B-hyve schedule is not affected.',
+        'It survives restarts.',
+      ],
+    },
     begin: (actor) => {
       const s = control.status();
       if (s.paused) return done(`⏸️ Already paused since ${at(s.paused.since)} (by ${safe(s.paused.by)}). Send /resume to resume.`);
@@ -68,6 +77,14 @@ export const buildControlCommands = ({ control, timeZone }: ControlDeps): Mutabl
     kind: 'mutable',
     name: 'resume',
     description: 'Resume automatic watering (asks for the passphrase)',
+    help: {
+      usage: [{ call: '/resume', does: 'turns supplemental watering back on' }],
+      details: [
+        'If watering is on hold, reply continue (carry on with it) or discard (cancel it); then the passphrase.',
+        'Held watering that was due over an hour ago is too old to continue safely: it is cancelled.',
+        'Either way the zones are checked against their sensors straight away.',
+      ],
+    },
     begin: (actor: Actor) => {
       const s = control.status();
       if (!s.paused) return done('▶️ Not paused: automatic watering is on. Nothing to resume.');

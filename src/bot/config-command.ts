@@ -73,6 +73,16 @@ export const buildConfigCommand = ({ editor }: ConfigCommandDeps): MutableComman
   kind: 'mutable',
   name: 'config',
   description: "Change a zone's watering settings (asks for the passphrase)",
+  help: {
+    usage: [{ call: '/config', does: "changes a zone's watering settings, one at a time" }],
+    details: [
+      `Settings: ${FIELDS.map((f) => f.key).join(', ')}.`,
+      'With several zones it first asks which one (reply its number).',
+      'For each setting reply a new value (e.g. 28, 12 min, 4h), next to keep it, back, or done to skip the rest.',
+      'Then it shows every change, including settings that follow from them, and asks for the passphrase.',
+      'Saved to conductor.json (the old one is kept as conductor.json.bak); used from the next poll.',
+    ],
+  },
   begin: (actor) => {
     const zones = editor.zones();
     if (zones.length === 0) return done('No zones are configured.');

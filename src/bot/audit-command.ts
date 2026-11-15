@@ -152,6 +152,18 @@ export const buildAuditCommand = (deps: AuditCommandDeps): InteractiveCommand =>
     kind: 'interactive',
     name: 'audit',
     description: 'What happened: the audit trail, a page at a time (e.g. /audit problems 7d)',
+    help: {
+      usage: [
+        { call: '/audit', does: 'everything from the last 24 h, newest first' },
+        { call: '/audit problems', does: 'only failures and recoveries' },
+        { call: '/audit watering 7d', does: 'watering of the last 7 days' },
+        { call: '/audit summary 7d', does: 'outages, each watering and its outcome, crashes' },
+      ],
+      details: [
+        'Views: all, problems, watering, commands, summary. Periods: e.g. 90m, 48h, 7d, 2w (up to 90 days).',
+        'Then reply more (older), back (newer), a page number, another view or period, or done.',
+      ],
+    },
     acceptsArgs: true,
     begin: async (_actor, args) => {
       const query = args.trim() === '' ? DEFAULT_QUERY : parseAuditQuery(args);

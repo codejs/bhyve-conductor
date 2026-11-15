@@ -19,6 +19,12 @@ export interface BotCommandsDeps extends CommandDeps {
   };
 }
 
+/** Commands that exist but aren't offered with these deps, with why (for /help). */
+export const unavailableCommands = (deps: Pick<BotCommandsDeps, 'changes'>): Map<string, string> =>
+  deps.changes
+    ? new Map()
+    : new Map(['pause', 'resume', 'config'].map((name) => [name, 'changes need a passphrase (TELEGRAM_COMMAND_PASSPHRASE on the conductor).']));
+
 export const buildBotCommands = (deps: BotCommandsDeps): BotCommand[] => {
   const { readAudit, changes, ...query } = deps;
   const timeZone = deps.timeZone;

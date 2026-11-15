@@ -81,11 +81,21 @@ export const passphraseStep = (q: { intro?: string; action: string; run: () => P
 
 // ---------- commands ----------
 
+/** What `/help <command>` shows (see help.ts, which adds what follows from the command's kind). */
+export interface CommandHelp {
+  /** Ways to call it, each with what it does: { call: '/audit problems 7d', does: 'failures and recoveries, last 7 days' }. */
+  usage: readonly { call: string; does: string }[];
+  /** A few short lines: what it shows or asks, and what to reply. */
+  details?: readonly string[];
+}
+
 interface CommandBase {
   /** Telegram command name: lowercase letters, digits and underscores, at most 32 (COMMAND_NAME). */
   name: string;
   /** Shown in /help and in the Telegram command menu. */
   description: string;
+  /** For `/help <name>`. Without it, the usage is just the command and its description. */
+  help?: CommandHelp;
 }
 
 /** Read-only, one reply. */

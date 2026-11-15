@@ -33,6 +33,16 @@ export const buildCommands = (deps: CommandDeps): QueryCommand[] => {
       kind: 'query',
       name: 'status',
       description: 'What the conductor is doing: polls, zones, watering, connections, alerts',
+      help: {
+        usage: [{ call: '/status', does: 'what the conductor is doing right now' }],
+        details: [
+          'Whether it is running or paused, and the last and next poll.',
+          "Each zone's latest decision and soil moisture.",
+          'Watering in progress or on hold, and water that is on.',
+          'Services that cannot be reached, and open alerts (batteries, moisture, controllers).',
+          'Nothing is fetched from the cloud, so it is always quick.',
+        ],
+      },
       cooldownSeconds: 0,
       run: async () => formatStatus(deps.status(), deps.timeZone),
     },
@@ -41,6 +51,10 @@ export const buildCommands = (deps: CommandDeps): QueryCommand[] => {
       name: 'sensors_read',
       script: 'sensors:read',
       description: 'Read the soil sensors now',
+      help: {
+        usage: [{ call: '/sensors_read', does: 'reads every soil sensor of the zones now' }],
+        details: ['For each sensor: moisture, temperature, battery, whether it is online, how old the reading is, and its zone.', 'Sensors that could not be read are listed with the reason.'],
+      },
       cooldownSeconds: 30,
       run: async () => {
         const readings = await deps.sensors.read();
@@ -52,6 +66,10 @@ export const buildCommands = (deps: CommandDeps): QueryCommand[] => {
       name: 'bhyve_devices',
       script: 'bhyve:devices',
       description: 'B-hyve controllers: connection, battery, mode, rain delay, zones',
+      help: {
+        usage: [{ call: '/bhyve_devices', does: 'lists the B-hyve controllers on the account' }],
+        details: ['For each: connected or not, battery, mode (auto/off), rain delay, whether it is watering, and its zones.'],
+      },
       cooldownSeconds: 30,
       run: async () => formatDevices(await deps.bhyve.getDevices()),
     },

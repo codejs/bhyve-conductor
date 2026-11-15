@@ -1054,12 +1054,14 @@ describe('CommandBot conversations', () => {
         [
           '🌱 <b>Lawn conductor commands</b>',
           '/status: Status',
-          '/help: this list',
+          '/help: this list, or how to use a command',
           '',
           '<b>Changes</b> (each asks for the passphrase):',
           '/pause: Pause watering',
           '/resume: Resume watering',
           '/cancel: cancel a pending change',
+          '',
+          'Send <b>/help</b> <i>command</i> to see how to use one, e.g. /help audit.',
         ].join('\n'),
       );
       expect(t.fake.api.setMyCommands.mock.calls[0]?.[0].map((c) => c.command)).toEqual(['help', 'status', 'pause', 'resume', 'cancel']);
@@ -1379,13 +1381,110 @@ describe('CommandBot conversations', () => {
       await t.send('/help');
 
       expect(t.replies[0]).toBe(
-        ['🌱 <b>Lawn conductor commands</b> (read-only)', '/status: Status', '/browse: Browse', '/help: this list', '/cancel: close what is waiting for your answer'].join('\n'),
+        [
+          '🌱 <b>Lawn conductor commands</b> (read-only)',
+          '/status: Status',
+          '/browse: Browse',
+          '/help: this list, or how to use a command',
+          '/cancel: close what is waiting for your answer',
+          '',
+          'Send <b>/help</b> <i>command</i> to see how to use one, e.g. /help audit.',
+        ].join('\n'),
       );
     });
 
     it('does not need a passphrase when every conversation is read-only', () => {
       const { bot: api } = fakeBotApi();
       expect(() => new CommandBot({ api, policy: PRIVATE, commands: [browse().command], reply: () => {} })).not.toThrow();
+    });
+  });
+
+  describe('/help', () => {
+    it('explains one command with /help <command>', async () => {
+      const t = track(setup());
+      await t.start();
+
+      await t.send('/help pause', '/help /RESUME');
+
+      expect(t.replies[0]?.split('\n')[0]).toBe('❓ <b>/pause</b>: Pause watering');
+      expect(t.replies[0]).toContain('🔐 Changes something: it asks for the passphrase last');
+      expect(t.replies[1]?.split('\n')[0]).toBe('❓ <b>/resume</b>: Resume watering');
+    });
+
+    it('never repeats an unknown name back, nor deletes anything (it is read-only)', async () => {
+      const t = track(setup());
+      await t.start();
+
+      await t.send('/help nothing_like_it', `/help ${PASS}`);
+
+      expect(t.replies).toEqual([
+        "🤷 There's no command by that name. Send /help for the list.",
+        '⚠️ Send /help for the list, or /help <i>command</i> for one of them, e.g. /help audit.', // (several words)
+      ]);
+      expect(t.fake.deleted).toEqual([]);
+      expectNoLeak(t);
+    });
+
+    it('shows the list for /start, whatever follows it (a Telegram deep link)', async () => {
+      const t = track(setup());
+      await t.start();
+
+      await t.send('/start', '/start some-payload');
+
+      expect(t.replies[0]).toMatch(/^🌱 <b>Lawn conductor commands<\/b>/);
+      expect(t.replies[1]).toBe(t.replies[0]);
+    });
+
+    it('can be used while a question waits, which keeps waiting', async () => {
+      const t = track(setup());
+      await t.start();
+
+      await t.send('/pause', '/help pause');
+      expect(t.bot.pendingConversation).toEqual({ command: 'pause', userId: OWNER.id });
+      await t.send('yes', PASS);
+
+      expect(t.pauseRun).toHaveBeenCalledOnce();
+    });
+
+    it('says which commands are switched off here, and why', async () => {
+      const clock = new VirtualClock(START);
+      const fake = fakeBotApi();
+      const replies: string[] = [];
+      const bot = new CommandBot({
+        api: fake.bot,
+        policy: PRIVATE,
+        commands: [statusCommand()],
+        unavailable: new Map([['config', 'changes need a passphrase.']]),
+        reply: (html) => replies.push(html),
+        clock,
+      });
+      active.push(bot);
+      bot.start();
+      await clock.advanceBy(0);
+
+      fake.push(updates(clock)('/help config'));
+      await clock.advanceBy(0);
+
+      expect(replies).toEqual(['⛔ /config is off here: changes need a passphrase.']);
+    });
+
+    it('uses the answer timeout the bot really has', async () => {
+      const t = track(setup({ options: { conversationTimeoutMs: 5 * MIN } }));
+      await t.start();
+
+      await t.send('/help pause');
+
+      expect(t.replies[0]).toContain('⌛ Each question waits 5 min for your answer.');
+    });
+
+    it('counts towards the command rate limit', async () => {
+      const t = track(setup({ options: { maxCommandsPerWindow: 2 } }));
+      await t.start();
+
+      await t.send('/help', '/help pause', '/help resume');
+
+      expect(t.replies).toHaveLength(3);
+      expect(t.replies[2]).toBe('🐢 Too many commands; ignoring them for up to 60 s.');
     });
   });
 });

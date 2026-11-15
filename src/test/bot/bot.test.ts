@@ -174,7 +174,9 @@ describe('CommandBot', () => {
           '/status: Does status',
           '/sensors_read: Does sensors_read',
           '/bhyve_devices: Does bhyve_devices',
-          '/help: this list',
+          '/help: this list, or how to use a command',
+          '',
+          'Send <b>/help</b> <i>command</i> to see how to use one, e.g. /help audit.',
         ].join('\n'),
       );
       expect(t.replies[1]).toBe(t.replies[0]);
@@ -560,7 +562,7 @@ describe('CommandBot', () => {
       expect(t.fake.api.getMe).toHaveBeenCalledTimes(1);
       expect(t.fake.api.setMyCommands).toHaveBeenCalledWith(
         [
-          { command: 'help', description: 'List the commands' },
+          { command: 'help', description: 'List the commands, or show how to use one' },
           { command: 'status', description: 'Does status' },
           { command: 'sensors_read', description: 'Does sensors_read' },
           { command: 'bhyve_devices', description: 'Does bhyve_devices' },

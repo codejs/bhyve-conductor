@@ -9,7 +9,8 @@ running conductor questions:
 | `/sensors_read` | `npm run sensors:read` | A fresh reading of every sensor in `conductor.json`: moisture, temperature, battery, online, age, and which zone it's in |
 | `/bhyve_devices` | `npm run bhyve:devices` | Each B-hyve controller: connected, battery, mode, rain delay, watering now, zones |
 | `/audit` | `npm run audit` | The audit trail, a page at a time, made for a phone ([below](#the-audit-trail-audit)) |
-| `/help` (or `/start`) | | The list above |
+| `/help` (or `/start`) | | The list of commands |
+| `/help <command>` | | How to use one, with examples (e.g. `/help audit`, `/help config`) |
 
 With a [passphrase](#pausing-and-resuming) set, the chat can also change things:
 
@@ -317,6 +318,10 @@ conversations, the passphrase and the audit trail.
 | `query` | one read-only reply (`/status`) | `run()` returning the reply; a `cooldownSeconds` if it calls a cloud API |
 | `interactive` | read-only, over several messages (`/audit`) | `begin()` returning steps |
 | `mutable` | anything that changes something (`/pause`, `/config`) | `begin()` returning steps that end with `passphraseStep` |
+
+Give every command a `help` (usage examples and a few lines on what it does) for `/help <command>`;
+what follows from its kind (read-only, the passphrase, cooldowns) is added automatically
+(`src/bot/help.ts`), and a test checks every registered command has usable help.
 
 Steps come from the builders: `done`, `ask` (a few answer words), `confirm` (yes/cancel), an `input`
 step with your own `read` (free-form answers), and `passphraseStep`. The rules the bot relies on:

@@ -26,6 +26,7 @@ import {
 } from './conversation.ts';
 import { clip, duration, safe } from './format.ts';
 import { classifyAttempt, PassphraseGate, type GateResult } from './gate.ts';
+import { BUILT_IN_HELP, HELP_ALIASES, helpFor, helpIndex } from './help.ts';
 
 /**
  * Answers commands sent to the Telegram bot, using long polling (getUpdates): the conductor only makes
@@ -138,6 +139,8 @@ export interface CommandBotDeps {
   commands: readonly BotCommand[];
   /** Required if any command is mutable (changes something). */
   passphrase?: string | undefined;
+  /** Commands that exist but are switched off here, with why, for /help (e.g. no passphrase set). */
+  unavailable?: ReadonlyMap<string, string>;
   /** Sends a reply (Telegram HTML) to the configured chat. Must not throw or block (e.g. DeliveryQueue.enqueue). */
   reply: (html: string) => void;
   audit?: AuditSink;
@@ -185,8 +188,7 @@ export class SlidingWindowLimiter {
   }
 }
 
-const HELP_NAMES = new Set(['help', 'start']);
-const BUILT_IN = new Set([...HELP_NAMES, 'cancel']);
+const BUILT_IN = new Set([...HELP_ALIASES, 'cancel']);
 /** Reasons that mean someone other than the allowed users tried (worth telling the owner). */
 const SUSPICIOUS: ReadonlySet<RejectReason> = new Set(['other-chat', 'user-not-allowed', 'anonymous', 'bot-sender', 'no-sender']);
 
@@ -379,9 +381,9 @@ export class CommandBot {
     log.info(`Telegram commands on${me.username ? ` for @${me.username}` : ''} (chat ${this.#deps.policy.chatId})`);
     const commands = [...this.#registry.values()];
     const menu = [
-      { command: 'help', description: 'List the commands' },
+      { command: 'help', description: BUILT_IN_HELP.help.description },
       ...commands.map((c) => ({ command: c.name, description: c.description })),
-      ...(commands.some((c) => c.kind !== 'query') ? [{ command: 'cancel', description: 'Cancel a pending change' }] : []),
+      ...(commands.some((c) => c.kind !== 'query') ? [{ command: 'cancel', description: BUILT_IN_HELP.cancel.description }] : []),
     ];
     try {
       await this.#deps.api.setMyCommands(menu, this.#deps.policy.chatId);
@@ -435,8 +437,14 @@ export class CommandBot {
       this.#deps.reply(`🤷 Unknown command${parsed ? ` /${safe(parsed.name, 32)}` : ''}. Send /help for the list.`);
       return;
     }
-    if (HELP_NAMES.has(parsed.name)) {
-      this.#deps.reply(this.#help());
+    if (HELP_ALIASES.has(parsed.name)) {
+      // "/help audit" explains one command. ("/start <anything>" is Telegram's deep link: just the list.)
+      const commands = [...this.#registry.values()];
+      this.#deps.reply(
+        parsed.name === 'help' && parsed.args !== ''
+          ? helpFor(parsed.args, commands, { ...(this.#deps.unavailable ? { unavailable: this.#deps.unavailable } : {}), answerTimeoutMs: this.#opts.conversationTimeoutMs })
+          : helpIndex(commands),
+      );
       return;
     }
     if (parsed.args !== '' && !(command && command.kind !== 'query' && command.acceptsArgs)) {
@@ -812,30 +820,6 @@ export class CommandBot {
       log.warn(`Telegram commands: could not send a reply directly (${errorMessage(err)}); queueing it`);
       this.#deps.reply(html);
     }
-  }
-
-  #help(): string {
-    const line = (c: BotCommand) => `/${c.name}: ${safe(c.description)}${c.kind === 'query' && c.script ? ` <i>(like npm run ${safe(c.script, 40)})</i>` : ''}`;
-    const all = [...this.#registry.values()];
-    const readOnly = all.filter((c) => c.kind !== 'mutable');
-    const mutable = all.filter((c) => c.kind === 'mutable');
-    if (mutable.length === 0) {
-      return [
-        '🌱 <b>Lawn conductor commands</b> (read-only)',
-        ...readOnly.map(line),
-        '/help: this list',
-        ...(all.some((c) => c.kind === 'interactive') ? ['/cancel: close what is waiting for your answer'] : []),
-      ].join('\n');
-    }
-    return [
-      '🌱 <b>Lawn conductor commands</b>',
-      ...readOnly.map(line),
-      '/help: this list',
-      '',
-      '<b>Changes</b> (each asks for the passphrase):',
-      ...mutable.map(line),
-      '/cancel: cancel a pending change',
-    ].join('\n');
   }
 
   /** Logs and audits a rejected command, at most once per sender per interval (and a bounded number overall). */
