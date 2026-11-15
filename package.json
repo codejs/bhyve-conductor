@@ -32,7 +32,7 @@
     "test:coverage": "vitest run --coverage",
     "archive": "rm -f bhyve-conductor.zip && zip -rq bhyve-conductor.zip . -x '.git/*' '*/.git/*' '.idea/*' '*/.idea/*' 'node_modules/*' '*/node_modules/*' '.env' '*/.env' '.conductor.db*' 'dist/*' '*.zip' 'coverage/*' '.DS_Store' '*/.DS_Store' 'bhyve-conductor.zip'"
   },
-  "keywords": [],cat
+  "keywords": [],
   "author": "",
   "license": "GPL-3.0-only",
   "engines": {
