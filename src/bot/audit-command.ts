@@ -1,7 +1,7 @@
 import type { AuditEvent } from '../audit/audit.ts';
 import { describe, filterEvents, RECOVERY_TYPES, summarize, type AuditFilter } from '../audit/report.ts';
 import { done, type InputResult, type InteractiveCommand, type Step } from './conversation.ts';
-import { duration, fitLines, safe } from './format.ts';
+import { duration, fitLines, isDuration, parseDuration, safe } from './format.ts';
 
 /**
  * /audit: the audit trail (like `npm run audit`), made for a phone. Newest first, grouped by day, a page
@@ -42,8 +42,6 @@ const VIEWS: Record<AuditView, { label: string; filter: Partial<AuditFilter> }> 
 const DAY_MS = 86_400_000;
 /** The longest period that can be asked for. */
 export const MAX_PERIOD_MS = 90 * DAY_MS;
-const PERIOD = /^(\d{1,4})(m|min|h|d|w)$/;
-const UNIT_MS: Record<string, number> = { m: 60_000, min: 60_000, h: 3_600_000, d: DAY_MS, w: 7 * DAY_MS };
 /** Characters of events per page (plus a header and footer), well within one Telegram message. */
 const PAGE_CHARS = 2_800;
 
@@ -71,12 +69,11 @@ export const parseAuditQuery = (text: string, base: AuditQuery = DEFAULT_QUERY):
       view = word as AuditView;
       continue;
     }
-    const m = PERIOD.exec(word);
-    if (m) {
+    if (isDuration(word)) {
       if (period) return { problem: 'Give only one period.' };
-      const ms = Number(m[1]) * (UNIT_MS[m[2] ?? ''] ?? 0);
-      if (!(ms > 0) || ms > MAX_PERIOD_MS) return { problem: 'The period must be between 1 min and 90 days, e.g. 48h or 7d.' };
-      period = { text: `${m[1]}${m[2] === 'min' ? 'm' : m[2]}`, ms };
+      const ms = parseDuration(word, { minMs: 60_000, maxMs: MAX_PERIOD_MS });
+      if (typeof ms !== 'number') return { problem: 'The period must be between 1 min and 90 days, e.g. 48h or 7d.' };
+      period = { text: word.replace(/min$/, 'm'), ms };
       continue;
     }
     // Never repeat what was typed (it could be something that shouldn't be in the chat twice).

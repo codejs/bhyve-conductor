@@ -5,28 +5,87 @@ running conductor questions:
 
 | Command | Like | What you get |
 |---|---|---|
-| `/status` | | Running since when, last and next poll, each zone's latest decision and soil %, watering in progress, unreachable services, open alerts |
+| `/health` | | Is everything all right? First what needs a look (if anything), then: running or paused, last and next poll, each zone (numbered), watering in progress or on hold, water that is on, connections, open alerts, and the service itself: version, uptime, memory, polls, file sizes, notifications ([below](#health-health)) |
+| `/zone [n]` | | Everything about one zone: the latest decision and why, each sensor, watering in the last 24 h against the daily cap, the cooldown, watering in progress, settings, alerts ([below](#one-zone-zone)) |
 | `/sensors_read` | `npm run sensors:read` | A fresh reading of every sensor in `conductor.json`: moisture, temperature, battery, online, age, and which zone it's in |
 | `/bhyve_devices` | `npm run bhyve:devices` | Each B-hyve controller: connected, battery, mode, rain delay, watering now, zones |
 | `/audit` | `npm run audit` | The audit trail, a page at a time, made for a phone ([below](#the-audit-trail-audit)) |
 | `/help` (or `/start`) | | The list of commands |
 | `/help <command>` | | How to use one, with examples (e.g. `/help audit`, `/help config`) |
 
+`/status` was replaced by `/health`, which shows everything it did, and more.
+
+One command is always there to make things **safer**; it asks you to confirm, but not for the passphrase:
+
+| Command | What it does |
+|---|---|
+| `/stop [n]` | Turns the water off now, on all the conductor's controllers or one zone's ([below](#stopping-the-water-stop)) |
+
 With a [passphrase](#pausing-and-resuming) set, the chat can also change things:
 
 | Command | What it does |
 |---|---|
-| `/pause` | Pauses automatic (supplemental) watering, until `/resume` |
+| `/pause [4h]` | Pauses automatic (supplemental) watering, until `/resume` or for a while |
 | `/resume` | Resumes it, continuing or cancelling any watering that the pause put on hold |
 | `/config` | Changes a zone's watering settings ([below](#changing-settings-config)) |
 | `/cancel` | Cancels a change that is waiting for your answer (or closes `/audit`) |
 
-**The commands above are read-only.** None of them can start, stop or delay watering, or change
+**The first commands are read-only.** None of them can start, stop or delay watering, or change
 anything on a controller or in the conductor. That is enforced in the code, not just by convention: they
-only get a B-hyve object with `getDevices` on it (see `src/bot/commands.ts`). `/pause` and `/resume`
+only get a B-hyve object with `getDevices` on it (see `src/bot/registry.ts`). `/stop` can only turn
+water *off*: it gets the conductor's stop and nothing that could start watering. `/pause` and `/resume`
 only switch the conductor's own automatic watering off and on, and `/config` only changes the seven
-zone settings listed below; none of them sends anything to B-hyve. `npm run bhyve:cmd` is deliberately
-not available from Telegram.
+zone settings listed below. **Nothing a chat can send starts watering**, and `npm run bhyve:cmd` is
+deliberately not available from Telegram.
+
+## Health (`/health`)
+
+`/health` answers "is everything all right?" first: **✅ all good**, or **⚠️ N things to look at**, with the
+list: a service that can't be reached, a failed last poll, no poll for more than two intervals, open alerts,
+notifications that couldn't be sent, changes locked after wrong passphrases, monitoring not running.
+Then what `/status` used to show: running or paused (and until when), the last and next poll, each zone's
+latest decision (numbered, for `/zone 2`), watering in progress or on hold, water that is on, connections
+and open alerts (in words: "🪫 low battery: sensor Probe A"). Last, the service: version, Node, uptime,
+memory, polls since start (ok, failed, stuck), the sizes of the audit trail, state and settings files, and
+notifications sent, failed and waiting. It fetches nothing from the cloud, so it's always quick.
+
+## One zone (`/zone`)
+
+`/zone 2` (the number from `/health`), `/zone Front lawn`, or `/zone` to pick one. It answers "why did
+(or didn't) it water?":
+
+- the latest decision and its full reason, e.g. "cooldown: Probe A at 24% (threshold 30%), but…";
+- each sensor: moisture, temperature, battery, how old, and why a reading isn't used (offline, stale, an
+  error), with how the zone combines them (driest, average, median);
+- watering in the last 24 hours against the daily cap, the last run, until when it rests (cooldown), water
+  that is on, the next cycle (or that it's on hold);
+- the settings (`/config` changes them) and the zone's open alerts.
+
+## Stopping the water (`/stop`)
+
+`/stop` turns the water off on all the conductor's controllers; `/stop 2` or `/stop Front lawn` only on
+that zone's controller. It shows what is on (B-hyve's view and the conductor's own watering) and asks
+you to confirm; reply **yes**. Then it:
+
+1. cancels the conductor's watering on those controllers (in progress or on hold), so no further cycle is
+   sent;
+2. sends B-hyve the stop. If a cycle was being sent at that very moment, it stops again once that send
+   is over (the cycle could otherwise start right after the stop);
+3. asks B-hyve a few seconds later whether the water is off, and tells you, controller by controller:
+   ✅ off, ⚠️ still says watering (its status can lag), ❓ couldn't ask, or ❌ couldn't send the stop
+   (then use the B-hyve app).
+
+Things to know:
+
+- **No passphrase**, on purpose: stopping water is the safe direction, and in an emergency speed matters.
+  Someone with an allowed account can only *withhold* water with it. It works even while changes are locked
+  after wrong passphrases, and it goes ahead of someone else's pending `/config` or `/pause`.
+- **A controller waters one zone at a time**, so stopping a zone stops its whole controller, including a
+  run from your B-hyve schedule. The controllers go back to their normal schedule; nothing is switched off.
+- **Automatic watering stays on.** Zones that still need water may start again at a later poll (a zone that
+  was just watered rests for its cooldown). Use `/pause` to keep it from starting again.
+- If nothing seems to be watering, it still offers to send the stop (B-hyve's status can lag).
+- It's in the audit trail (`watering.stopped`, `/audit commands`).
 
 ## Setup
 
@@ -75,9 +134,20 @@ It must be at least 8 characters, must not start or end with a space or start wi
 be one of the answer words (`yes`, `cancel`, `continue`, …). The conductor refuses to start otherwise.
 Without a passphrase, `/pause` and `/resume` don't exist.
 
+### For a while
+
+`/pause 4h` (or `90m`, `2d`…, from 5 minutes up to 30 days) pauses until then, and automatic watering then
+**resumes on its own**: watering that was on hold is cancelled (it's an old plan) and the zones are
+re-checked at once; you get "▶️ The pause is over". While paused, `/pause 4h` changes when the pause
+ends (it asks for the passphrase). The end is saved, so it holds across restarts, and a pause whose end
+passed while the conductor was down ends as soon as it starts again.
+
+A pause with **no end** is reminded of once a day ("⏸️ Still paused after 2 day(s)…"), so it can't be
+forgotten for long.
+
 ### What a pause does
 
-- **No new supplemental watering** starts. Zones that need water show as `paused` in `/status`.
+- **No new supplemental watering** starts. Zones that need water show as `paused` in `/health` and `/zone`.
 - **Watering in progress is put on hold**: its remaining cycles aren't sent.
 - **Water that is already on is not turned off.** A cycle that has started runs its course (at most
   `maxCycleMinutes`). To stop it immediately, use the B-hyve app.
@@ -85,7 +155,7 @@ Without a passphrase, `/pause` and `/resume` don't exist.
   A pause is often the moment those matter most.
 - **Your regular B-hyve schedule is not affected**; the conductor never controlled it.
 - **It survives restarts.** The pause is saved in the state file. After a restart you get
-  "⏸️ Restarted while paused", and `/status` shows it.
+  "⏸️ Restarted while paused", and `/health` shows it.
 
 ### The conversations
 
@@ -127,7 +197,7 @@ These apply to every change (`/pause`, `/resume`, `/config`):
   time, up to 24 hours) until the right passphrase is given. While locked, not even the right
   passphrase is accepted. Read-only commands keep working.
 - Answering "yes" after a question has expired tells you it expired; nothing happens.
-- Read-only commands (`/status`, …) can be used while a question is waiting; it keeps waiting.
+- Read-only commands (`/health`, …) can be used while a question is waiting; it keeps waiting.
   Starting another change replaces yours.
 - In a group, only the person who sent the command can answer it. Anyone else trying a change waits
   until it's done. The bot's questions open the reply box for that person, which also lets the bot
@@ -298,7 +368,9 @@ leaks, revoke it with @BotFather (`/revoke`) and update `.env`.
 | `Telegram commands are off until restart: … 401` | The token was revoked or is wrong. Fix `.env` and restart. |
 | In a group, the bot doesn't see commands | With privacy mode on (the default), bots in groups only receive messages starting with `/`, which is all the commands need. If still nothing, check that the bot is a member of the group. |
 | `⏳ … can run again in …` | The 30-second cooldown on cloud-API commands. |
-| `/pause`, `/resume` or `/config` is "Unknown command" | No `TELEGRAM_COMMAND_PASSPHRASE` is set. |
+| `/pause`, `/resume` or `/config` "is off here" | No `TELEGRAM_COMMAND_PASSPHRASE` is set. |
+| `/status` "is off here" | It was replaced by `/health`. |
+| `/stop`: "⚠️ B-hyve still says it is watering" | B-hyve's status can lag a minute; check `/health` again, or stop it in the B-hyve app. |
 | `/config`: "has changed since the conductor started" | `conductor.json` was edited by hand; restart the conductor to load it, then try again. |
 | `/config`: "could not save" | The conductor can't write `conductor.json` (or a temporary file next to it): check the permissions. |
 | `/audit`: "only its newest part was read" | The audit file is large; use `npm run audit` on the machine for older events. |
@@ -315,8 +387,9 @@ conversations, the passphrase and the audit trail.
 
 | Kind | For | Write |
 |---|---|---|
-| `query` | one read-only reply (`/status`) | `run()` returning the reply; a `cooldownSeconds` if it calls a cloud API |
-| `interactive` | read-only, over several messages (`/audit`) | `begin()` returning steps |
+| `query` | one read-only reply (`/health`) | `run()` returning the reply; a `cooldownSeconds` if it calls a cloud API |
+| `interactive` | read-only, over several messages (`/audit`, `/zone`) | `begin()` returning steps |
+| `safety` | only ever less water (`/stop`) | `begin()` returning steps that end with `confirm` → `act` |
 | `mutable` | anything that changes something (`/pause`, `/config`) | `begin()` returning steps that end with `passphraseStep` |
 
 Give every command a `help` (usage examples and a few lines on what it does) for `/help <command>`;
@@ -326,8 +399,12 @@ what follows from its kind (read-only, the passphrase, cooldowns) is added autom
 Steps come from the builders: `done`, `ask` (a few answer words), `confirm` (yes/cancel), an `input`
 step with your own `read` (free-form answers), and `passphraseStep`. The rules the bot relies on:
 
-- `begin` and `read` only read. The only place a change may happen is a passphrase step's `run`. (The bot
-  refuses a passphrase step from a read-only command.)
+- `begin` and `read` only read. The only place a change may happen is a passphrase step's `run` (mutable
+  commands) or an act step's `run` (safety commands, which must be given nothing that could add water).
+  The bot refuses a passphrase step from anything but a mutable command, and an act step from anything
+  but a safety command.
+- To ask for a zone, use `pickZone` / `findZone` (`src/bot/zones.ts`); wire new needs through
+  `conductorCommandDeps` (`src/bot/registry.ts`), which hands each command only the calls it uses.
 - Never repeat what the user typed in a reply: it could be the passphrase, sent too early.
 - Escape everything that doesn't come from the code: `safe()`, `where()`, `fitLines()` in `format.ts`.
 - Never compare anything with the passphrase: that's the gate's job (`src/bot/gate.ts`), at the

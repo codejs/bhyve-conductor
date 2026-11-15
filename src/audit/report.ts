@@ -184,11 +184,11 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
       return `telegram commands that change something LOCKED until ${at(e.until)} after ${String(e.failures)} wrong passphrase(s)`;
     case 'conductor.paused': {
       const held = Array.isArray(e.held) ? (e.held as unknown[]).length : 0;
-      return `conductor PAUSED by ${String(e.by)}${held > 0 ? ` (${held} watering sequence(s) on hold)` : ''}${e.sendInProgress ? '; a cycle was being sent' : ''}`;
+      return `conductor PAUSED by ${String(e.by)}${typeof e.until === 'string' ? ` until ${at(e.until)}` : ''}${held > 0 ? ` (${held} watering sequence(s) on hold)` : ''}${e.sendInProgress ? '; a cycle was being sent' : ''}`;
     }
     case 'conductor.resumed': {
       const list = (v: unknown) => (Array.isArray(v) && v.length > 0 ? v.map(String).join(', ') : 'none');
-      return `conductor resumed by ${String(e.by)} after ${String(e.pausedMinutes)} min (held sequences: ${String(e.held)}; continued: ${list(e.continued)}; discarded: ${list(e.discarded)})`;
+      return `conductor resumed ${e.auto ? '(pause over) ' : ''}by ${String(e.by)} after ${String(e.pausedMinutes)} min (held sequences: ${String(e.held)}; continued: ${list(e.continued)}; discarded: ${list(e.discarded)})`;
     }
     case 'config.changed': {
       const changes = Array.isArray(e.changes)
@@ -197,6 +197,18 @@ export const describe = (e: AuditEvent, timeZone?: string): string => {
             .join(', ')
         : '';
       return `settings of zone ${String(e.zone)} (${String(e.name)}) CHANGED by ${String(e.by)}: ${changes}`;
+    }
+    case 'conductor.pause_changed':
+      return `pause now ends ${at(e.until)} (changed by ${String(e.by)}${typeof e.previousUntil === 'string' ? `; was ${at(e.previousUntil)}` : ''})`;
+    case 'conductor.pause_reminder':
+      return `still PAUSED after ${String(e.pausedHours)} h (since ${at(e.since)} by ${String(e.by)})`;
+    case 'watering.stopped': {
+      const devices = Array.isArray(e.devices)
+        ? (e.devices as { device?: unknown; sent?: unknown; check?: unknown; error?: unknown; cancelled?: unknown }[])
+            .map((d) => `${String(d.device)}: ${d.sent ? `stop sent, B-hyve says ${String(d.check)}` : `NOT SENT (${String(d.error)})`}${d.cancelled ? `, cancelled seq ${String(d.cancelled)}` : ''}`)
+            .join('; ')
+        : '';
+      return `watering STOPPED by ${String(e.by)}: ${devices}`;
     }
     case 'conductor.still_paused':
       return `started while PAUSED (since ${at(e.since)} by ${String(e.by)})`;

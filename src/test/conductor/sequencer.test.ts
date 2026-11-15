@@ -738,4 +738,105 @@ describe('Sequencer', () => {
       expect(t.sequencer.pending()).toHaveLength(1);
     });
   });
+
+  describe('cancel (the water was stopped)', () => {
+    it('ends a running sequence at once: no more cycles, no "water off" report', async () => {
+      const t = setup();
+      await t.sequencer.start({ ...command([wave([1, 10]), wave([1, 10]), wave([1, 10])]), zones: [zone({ name: 'Front' })] });
+
+      const result = t.sequencer.cancel('dev1', 'stopped by @owner via Telegram');
+      await vi.advanceTimersByTimeAsync(5 * 60 * MIN);
+
+      expect(result).toEqual({ cancelled: expect.objectContaining({ nextWave: 1 }) });
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      expect(t.audit.ofType('sequence.abandoned')).toEqual([expect.objectContaining({ reason: 'stopped by @owner via Telegram', cyclesDelivered: 1, of: 3 })]);
+      expect(t.types()).not.toContain('sequence.finished');
+      expect(t.sequencer.pending()).toEqual([]);
+      expect(t.sequencer.wateringNow()).toEqual([]); // the water is (being) turned off
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('cancels the "water off" report of a finished sequence whose last cycle is still running', async () => {
+      const t = setup();
+      await t.sequencer.start(command([wave([1, 10])]));
+
+      expect(t.sequencer.cancel('dev1', 'stopped')).toEqual({});
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+
+      expect(t.types()).toContain('sequence.completed');
+      expect(t.types()).not.toContain('sequence.finished');
+      expect(t.sequencer.wateringNow()).toEqual([]);
+    });
+
+    it('cancels a held sequence (paused)', async () => {
+      const t = setup();
+      await t.sequencer.start(TWO_CYCLES);
+      t.sequencer.pause();
+
+      expect(t.sequencer.cancel('dev1', 'stopped').cancelled).toBeDefined();
+      await t.sequencer.continueHeld();
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+    });
+
+    it('leaves other controllers alone', async () => {
+      const t = setup();
+      t.fake.setDevices(bhyveDevice('dev1'), bhyveDevice('dev2'));
+      await t.sequencer.start(TWO_CYCLES);
+      await t.sequencer.start({ ...TWO_CYCLES, deviceId: 'dev2' });
+
+      t.sequencer.cancel('dev1', 'stopped');
+      await vi.advanceTimersByTimeAsync(40 * MIN);
+
+      expect(t.bhyve.startWatering.mock.calls.map((c) => c[0])).toEqual(['dev1', 'dev2', 'dev2']);
+    });
+
+    it('sends nothing if cancelled while the device is being checked before a cycle', async () => {
+      const t = setup();
+      await t.sequencer.start(TWO_CYCLES);
+      let answer: (d: BhyveDevice) => void = () => {};
+      t.bhyve.getDevice.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+      await vi.advanceTimersByTimeAsync(40 * MIN); // cycle 2 due: precheck under way
+
+      t.sequencer.cancel('dev1', 'stopped');
+      answer(bhyveDevice('dev1'));
+      await vi.advanceTimersByTimeAsync(60 * MIN);
+
+      expect(t.bhyve.startWatering).toHaveBeenCalledOnce();
+      expect(t.types().filter((x) => x === 'wave.sent')).toHaveLength(1);
+    });
+
+    it('says when a cycle is being sent at that moment, and settles when that send is over', async () => {
+      const t = setup();
+      await t.sequencer.start(command([wave([1, 10]), wave([1, 10]), wave([1, 10])]));
+      let delivered: () => void = () => {};
+      t.bhyve.startWatering.mockImplementationOnce(async (deviceId: string) => {
+        await new Promise<void>((resolve) => (delivered = resolve));
+        t.fake.emit({ event: 'watering_in_progress_notification', device_id: deviceId });
+      });
+      await vi.advanceTimersByTimeAsync(40 * MIN); // cycle 2 being sent
+
+      const { sending } = t.sequencer.cancel('dev1', 'stopped');
+      expect(sending).toBeInstanceOf(Promise);
+      let settled = false;
+      void sending?.then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+
+      delivered();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      await vi.advanceTimersByTimeAsync(5 * 60 * MIN);
+      expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2); // cycle 3 never comes
+      expect(t.sequencer.cancel('dev1', 'stopped again')).toEqual({}); // nothing left (and the running wave is forgotten)
+      expect(t.sequencer.wateringNow()).toEqual([]);
+    });
+
+    it('does nothing for a controller with no watering', () => {
+      const t = setup();
+      expect(t.sequencer.cancel('dev1', 'stopped')).toEqual({});
+      expect(t.types()).toEqual([]);
+    });
+  });
 });

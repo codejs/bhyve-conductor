@@ -36,6 +36,8 @@ export interface PauseInfo {
   since: Date;
   /** Who paused it, for messages (e.g. "@owner via Telegram"). */
   by: string;
+  /** When it ends on its own (e.g. /pause 4h); unset: until /resume. */
+  until?: Date;
 }
 
 export interface ConductorState {
@@ -68,7 +70,7 @@ const FileSchema = z.object({
     )
     .default([]),
   alerts: z.record(z.string(), z.object({ state: z.string(), since: z.iso.datetime() })).default({}),
-  paused: z.object({ since: z.iso.datetime(), by: z.string() }).optional(),
+  paused: z.object({ since: z.iso.datetime(), by: z.string(), until: z.iso.datetime().optional() }).optional(),
 });
 
 /** Persists history and pending sequences as one JSON file; writes go to a temp file first so a crash can't leave half a file. */
@@ -109,7 +111,15 @@ export class FileStateStore {
         ...(s.inFlight ? { inFlight: { wave: s.inFlight.wave, since: new Date(s.inFlight.since) } } : {}),
       })),
       alerts: parsed.alerts,
-      ...(parsed.paused ? { paused: { since: new Date(parsed.paused.since), by: parsed.paused.by } } : {}),
+      ...(parsed.paused
+        ? {
+            paused: {
+              since: new Date(parsed.paused.since),
+              by: parsed.paused.by,
+              ...(parsed.paused.until ? { until: new Date(parsed.paused.until) } : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -124,7 +134,15 @@ export class FileStateStore {
       })),
       alerts: state.alerts,
       // Only written while paused, so files stay as they were for everyone else.
-      ...(state.paused ? { paused: { since: state.paused.since.toISOString(), by: state.paused.by } } : {}),
+      ...(state.paused
+        ? {
+            paused: {
+              since: state.paused.since.toISOString(),
+              by: state.paused.by,
+              ...(state.paused.until ? { until: state.paused.until.toISOString() } : {}),
+            },
+          }
+        : {}),
     };
     await writeFileAtomic(this.#path, `${JSON.stringify(body, null, 2)}\n`);
   }

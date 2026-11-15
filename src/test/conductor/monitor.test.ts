@@ -42,6 +42,7 @@ const setup = (
     audit?: MemoryAuditLog;
     pendingSequences?: PendingSequence[];
     paused?: PauseInfo;
+    stopCheckDelayMs?: number;
   } = {},
 ) => {
   let readings: MoistureReading[] = [];
@@ -61,6 +62,7 @@ const setup = (
     ...(opts.audit ? { audit: opts.audit } : {}),
     ...(opts.pendingSequences ? { pendingSequences: opts.pendingSequences } : {}),
     ...(opts.paused ? { paused: opts.paused } : {}),
+    ...(opts.stopCheckDelayMs !== undefined ? { stopCheckDelayMs: opts.stopCheckDelayMs } : {}),
     now: () => now,
   });
 
@@ -1166,6 +1168,7 @@ describe('Monitor.status', () => {
       wateringNow: [],
       outages: [],
       alerts: [],
+      polls: { ok: 0, failed: 0, hung: 0 },
     });
   });
 
@@ -1568,5 +1571,366 @@ describe('Monitor pause and resume', () => {
     t.monitor.paused?.since.setFullYear(2000);
 
     expect(t.monitor.paused?.since).toEqual(NOW);
+  });
+});
+
+describe('Monitor.stopWatering', () => {
+  const MINUTE_MS = 60_000;
+  const BY = '@owner via Telegram';
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const cycling = () => zone({ name: 'Front', runMinutes: 35, maxCycleMinutes: 15, soakMinutes: 30, maxMinutesPerDay: 60 });
+  /** stopWatering waits a moment before asking B-hyve; let that moment pass. */
+  const stop = async (t: ReturnType<typeof setup>, ids: string[]) => {
+    const result = t.monitor.stopWatering(ids, BY);
+    await vi.advanceTimersByTimeAsync(5_000);
+    return result;
+  };
+
+  it('cancels the conductor’s watering, sends the stop, and checks that the water is off', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const store = { save: vi.fn(async () => {}) };
+    const t = setup(config([cycling()]), { audit, store });
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle(); // cycle 1 of 3 on
+
+    const results = await stop(t, ['dev1']);
+    vi.advanceTimersByTime(10 * 60 * MINUTE_MS);
+    await flush();
+
+    expect(results).toEqual([
+      { deviceId: 'dev1', zoneNames: ['Front'], sent: true, cancelled: expect.objectContaining({ nextCycle: 2, cycles: 3 }), check: 'off' },
+    ]);
+    expect(t.bhyve.stopWatering).toHaveBeenCalledWith('dev1');
+    expect(t.bhyve.startWatering).toHaveBeenCalledOnce(); // no more cycles
+    expect(t.monitor.status().sequences).toEqual([]);
+    expect(t.monitor.status().wateringNow).toEqual([]);
+    expect(audit.ofType('sequence.abandoned')).toEqual([expect.objectContaining({ reason: `stopped by ${BY}` })]);
+    expect(audit.ofType('watering.stopped')).toEqual([
+      expect.objectContaining({ by: BY, devices: [{ device: 'dev1', zoneNames: ['Front'], sent: true, check: 'off', cancelled: expect.any(String) }] }),
+    ]);
+    expect(store.save).toHaveBeenCalled();
+  });
+
+  it('waits a moment before asking B-hyve (its status lags)', async () => {
+    const t = setup(config([zone()]), { stopCheckDelayMs: 5_000 });
+    const pending = t.monitor.stopWatering(['dev1'], BY);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(t.bhyve.getDevice).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(t.bhyve.getDevice).toHaveBeenCalledWith('dev1');
+  });
+
+  it('stops each controller once, and stops a controller with no conductor watering too (a schedule run, say)', async () => {
+    const t = setup(config([zone({ station: 1 }), zone({ station: 2 }), zone({ deviceId: 'dev2' })]));
+    t.setDevices(bhyveDevice('dev1'), bhyveDevice('dev2', { status: { run_mode: 'auto', watering_status: { current_station: 1 } } }));
+
+    const results = await stop(t, ['dev1', 'dev2', 'dev1']);
+
+    expect(t.bhyve.stopWatering.mock.calls).toEqual([['dev1'], ['dev2']]);
+    expect(results.map((r) => [r.deviceId, r.zoneNames, r.check, r.cancelled])).toEqual([
+      ['dev1', ['Zone 1', 'Zone 2'], 'off', undefined],
+      ['dev2', ['Zone 1'], 'watering', undefined], // B-hyve still says so
+    ]);
+  });
+
+  it('reports a stop that could not be sent, and keeps going with the others', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone(), zone({ deviceId: 'dev2' })]), { audit });
+    t.bhyve.stopWatering.mockRejectedValueOnce(new Error('B-hyve socket did not open within 15s'));
+
+    const results = await stop(t, ['dev1', 'dev2']);
+
+    expect(results.map((r) => [r.deviceId, r.sent, r.error])).toEqual([
+      ['dev1', false, 'B-hyve socket did not open within 15s'],
+      ['dev2', true, undefined],
+    ]);
+    // (The second stop went through, so the command connection counts as working again.)
+    expect(audit.ofType('connection.lost')).toEqual([expect.objectContaining({ service: 'bhyve-commands' })]);
+    expect(audit.ofType('watering.stopped')[0]?.devices).toEqual([
+      expect.objectContaining({ device: 'dev1', sent: false, error: 'B-hyve socket did not open within 15s' }),
+      expect.objectContaining({ device: 'dev2', sent: true }),
+    ]);
+  });
+
+  it('says it cannot tell whether the water is off when B-hyve cannot be asked', async () => {
+    const t = setup(config([zone()]));
+    t.bhyve.getDevice.mockRejectedValueOnce(new Error('HTTP 503'));
+
+    expect((await stop(t, ['dev1']))[0]?.check).toBe('unknown');
+  });
+
+  it('stops again once a cycle that was being sent at that moment is over (it could start after the first stop)', async () => {
+    const t = setup(config([cycling()]));
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+    let delivered: () => void = () => {};
+    t.bhyve.startWatering.mockImplementationOnce(async (deviceId: string) => {
+      await new Promise<void>((resolve) => (delivered = resolve));
+      void deviceId;
+    });
+    vi.advanceTimersByTime((11.7 + 30) * MINUTE_MS); // cycle 2 is being sent
+    await flush();
+    expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2);
+
+    const pending = t.monitor.stopWatering(['dev1'], BY);
+    await flush();
+    expect(t.bhyve.stopWatering).toHaveBeenCalledTimes(1);
+    delivered();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const [result] = await pending;
+
+    expect(t.bhyve.stopWatering).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ sent: true, resent: true });
+    vi.advanceTimersByTime(5 * 60 * MINUTE_MS);
+    await flush();
+    expect(t.bhyve.startWatering).toHaveBeenCalledTimes(2); // cycle 3 never comes
+  });
+});
+
+describe('Monitor.zoneStatus', () => {
+  beforeEach(() => {
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+  });
+
+  it('tells everything about a zone: settings, sensors, decision, watering, limits, alerts', async () => {
+    const history = new WateringHistory([{ zoneKey: 'dev1:1', at: minutesAgo(60), minutes: 10 }]);
+    const z = zone({ name: 'Front', sensorIds: ['s1', 's2', 's3', 's4'], maxReadingAgeMinutes: 180 });
+    const t = setup(config([z]), { history });
+    t.setReadings(
+      reading('s1', 24, { sensorName: 'Probe A', batteryPct: 8, temperatureC: 21 }),
+      reading('s2', 40, { sensorName: 'Probe B', at: minutesAgo(500) }),
+      reading('s3', 30, { sensorName: 'Probe C', online: false }),
+    );
+    t.source.read.mockImplementationOnce(async () => {
+      Object.assign(t.source, { lastErrors: [{ sensorId: 's4', error: 'code 1106 permission deny' }] });
+      return [reading('s1', 24, { sensorName: 'Probe A', batteryPct: 8, temperatureC: 21 }), reading('s2', 40, { sensorName: 'Probe B', at: minutesAgo(500) }), reading('s3', 30, { sensorName: 'Probe C', online: false })];
+    });
+    await t.monitor.runCycle();
+
+    const detail = t.monitor.zoneStatus('dev1:1');
+
+    expect(detail).toMatchObject({
+      at: NOW,
+      zone: { key: 'dev1:1', name: 'Front', deviceId: 'dev1', station: 1, thresholdPct: 30, cooldownMinutes: 240, sensorAggregation: 'driest' },
+      decision: { reason: 'cooldown', action: 'skip' },
+      sensors: [
+        { id: 's1', name: 'Probe A', moisturePct: 24, batteryPct: 8, temperatureC: 21, at: minutesAgo(10) },
+        { id: 's2', name: 'Probe B', moisturePct: 40, problem: 'stale (500 min old)' },
+        { id: 's3', name: 'Probe C', problem: 'offline' },
+        { id: 's4', problem: 'code 1106 permission deny' },
+      ],
+      usedLastDayMinutes: 10,
+      lastRun: { at: minutesAgo(60), minutes: 10 },
+      cooldownUntil: new Date(NOW.getTime() + 180 * 60_000),
+      alerts: [{ key: 'battery:sensor:s1', state: 'low', since: NOW }],
+    });
+    expect(detail?.sensors[0]).not.toHaveProperty('problem');
+  });
+
+  it('knows no readings before the first poll, and no cooldown once it is over', () => {
+    const history = new WateringHistory([{ zoneKey: 'dev1:1', at: minutesAgo(300), minutes: 10 }]);
+    const t = setup(config([zone()]), { history });
+
+    expect(t.monitor.zoneStatus('dev1:1')).toMatchObject({ sensors: [{ id: 's1', problem: 'no reading yet' }], lastRun: { minutes: 10 } });
+    expect(t.monitor.zoneStatus('dev1:1')).not.toHaveProperty('cooldownUntil');
+    expect(t.monitor.zoneStatus('dev1:1')).not.toHaveProperty('decision');
+  });
+
+  it('shows the watering on its controller, the pause, and only its own alerts', async () => {
+    const t = setup(config([zone({ name: 'Front', runMinutes: 35, maxCycleMinutes: 15, maxMinutesPerDay: 60 }), zone({ name: 'Back', deviceId: 'dev2', sensorIds: ['s9'] })]));
+    t.setReadings(reading('s1', 10), reading('s9', 50, { batteryPct: 5 }));
+    await t.monitor.runCycle();
+    await t.monitor.pause('@owner via Telegram');
+
+    const front = t.monitor.zoneStatus('dev1:1');
+    expect(front).toMatchObject({
+      sequence: { deviceId: 'dev1', nextCycle: 2, cycles: 3 },
+      wateringNow: { deviceId: 'dev1', cycle: 1 },
+      paused: { by: '@owner via Telegram' },
+      alerts: [{ key: 'moisture:dev1:1:s1', state: 'low' }], // its own (critically dry), not Back's battery
+    });
+    expect(t.monitor.zoneStatus('dev2:1')).toMatchObject({ alerts: [{ key: 'battery:sensor:s9' }] });
+    expect(t.monitor.zoneStatus('dev2:1')).not.toHaveProperty('sequence');
+  });
+
+  it('returns nothing for an unknown zone', () => {
+    expect(setup(config([zone()])).monitor.zoneStatus('nope:1')).toBeUndefined();
+  });
+});
+
+describe('Monitor timed pause and reminders', () => {
+  const MINUTE_MS = 60_000;
+  const HOUR_MS = 60 * MINUTE_MS;
+  const BY = '@owner via Telegram';
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.spyOn(log, 'info').mockImplementation(() => {});
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('resumes on its own when the time is up, discarding held watering, and says so', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const store = { save: vi.fn<(s: ConductorState) => Promise<void>>(async () => {}) };
+    const t = setup(config([zone({ runMinutes: 35, maxCycleMinutes: 15, maxMinutesPerDay: 60 })]), { audit, store });
+    t.setReadings(reading('s1', 10));
+    await t.monitor.runCycle();
+
+    await t.monitor.pause(BY, { until: new Date(NOW.getTime() + 2 * HOUR_MS) });
+    expect(store.save.mock.calls.at(-1)?.[0].paused).toEqual({ since: NOW, by: BY, until: new Date(NOW.getTime() + 2 * HOUR_MS) });
+    expect(audit.ofType('conductor.paused')[0]).toMatchObject({ until: new Date(NOW.getTime() + 2 * HOUR_MS).toISOString() });
+
+    t.advance(119);
+    vi.advanceTimersByTime(119 * MINUTE_MS);
+    await flush();
+    expect(t.monitor.paused).toBeDefined();
+    t.advance(1);
+    vi.advanceTimersByTime(MINUTE_MS);
+    await flush();
+
+    expect(t.monitor.paused).toBeUndefined();
+    expect(audit.ofType('conductor.resumed')).toEqual([expect.objectContaining({ by: 'the end of the pause', auto: true, held: 'discard', pausedBy: BY })]);
+    expect(audit.ofType('sequence.abandoned')).toHaveLength(1);
+  });
+
+  it('gives a pause a new end (or one) when already paused', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone()]), { audit });
+    await t.monitor.pause(BY);
+
+    const result = await t.monitor.pause('@family via Telegram', { until: new Date(NOW.getTime() + HOUR_MS) });
+
+    expect(result).toMatchObject({ changed: false, updated: true, paused: { since: NOW, by: BY, until: new Date(NOW.getTime() + HOUR_MS) } });
+    expect(audit.ofType('conductor.pause_changed')).toEqual([expect.objectContaining({ by: '@family via Telegram', until: new Date(NOW.getTime() + HOUR_MS).toISOString() })]);
+    await t.monitor.pause(BY, { until: new Date(NOW.getTime() + 2 * HOUR_MS) });
+    expect(audit.ofType('conductor.pause_changed')[1]).toMatchObject({ previousUntil: new Date(NOW.getTime() + HOUR_MS).toISOString() });
+
+    t.advance(60);
+    vi.advanceTimersByTime(HOUR_MS);
+    await flush();
+    expect(t.monitor.paused).toBeDefined(); // the first end was replaced
+    t.advance(60);
+    vi.advanceTimersByTime(HOUR_MS);
+    await flush();
+    expect(t.monitor.paused).toBeUndefined();
+  });
+
+  it('does not end a pause early after /resume and a new pause', async () => {
+    const t = setup(config([zone()]));
+    await t.monitor.pause(BY, { until: new Date(NOW.getTime() + HOUR_MS) });
+    await t.monitor.resume(BY, 'discard');
+    expect(vi.getTimerCount()).toBe(0); // the end of the old pause is forgotten
+    await t.monitor.pause(BY);
+
+    t.advance(90);
+    vi.advanceTimersByTime(90 * MINUTE_MS);
+    await flush();
+
+    expect(t.monitor.paused).toBeDefined();
+  });
+
+  it('keeps the end across a restart, and ends at once if it passed while down', async () => {
+    const later = setup(config([zone()]), { paused: { since: minutesAgo(30), by: BY, until: new Date(NOW.getTime() + 30 * MINUTE_MS) } });
+    later.monitor.start();
+    await flush();
+    expect(later.monitor.paused).toBeDefined();
+    later.advance(30);
+    vi.advanceTimersByTime(30 * MINUTE_MS);
+    await flush();
+    expect(later.monitor.paused).toBeUndefined();
+    await later.monitor.stop();
+
+    const passed = setup(config([zone()]), { paused: { since: minutesAgo(300), by: BY, until: minutesAgo(60) } });
+    passed.monitor.start();
+    await flush();
+    vi.advanceTimersByTime(0);
+    await flush();
+    expect(passed.monitor.paused).toBeUndefined();
+    await passed.monitor.stop();
+  });
+
+  it('stop() cancels the end of the pause (it is saved, and ends after the restart)', async () => {
+    const t = setup(config([zone()]));
+    t.monitor.start();
+    await t.monitor.pause(BY, { until: new Date(NOW.getTime() + HOUR_MS) });
+    await t.monitor.stop();
+
+    t.advance(120);
+    vi.advanceTimersByTime(2 * HOUR_MS);
+    await flush();
+
+    expect(t.monitor.paused).toBeDefined();
+  });
+
+  it('reminds once a day while paused with no end', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone()], { pollIntervalMinutes: 60 }), { audit });
+    t.setReadings(reading('s1', 50));
+    await t.monitor.pause(BY);
+    t.monitor.start();
+    await flush();
+
+    for (let h = 0; h < 50; h++) {
+      t.advance(60);
+      vi.advanceTimersByTime(HOUR_MS);
+      await flush();
+    }
+
+    expect(audit.ofType('conductor.pause_reminder').map((e) => e.pausedHours)).toEqual([24, 48]);
+    await t.monitor.stop();
+  });
+
+  it('does not remind about a pause that ends on its own', async () => {
+    const audit = new MemoryAuditLog(() => NOW);
+    const t = setup(config([zone()], { pollIntervalMinutes: 60 }), { audit });
+    t.setReadings(reading('s1', 50));
+    await t.monitor.pause(BY, { until: new Date(NOW.getTime() + 72 * HOUR_MS) });
+    t.monitor.start();
+    await flush();
+
+    for (let h = 0; h < 30; h++) {
+      t.advance(60);
+      vi.advanceTimersByTime(HOUR_MS);
+      await flush();
+    }
+
+    expect(audit.ofType('conductor.pause_reminder')).toEqual([]);
+    await t.monitor.stop();
+  });
+
+  it('counts the polls: finished, failed, stuck', async () => {
+    const t = setup(config([zone()]));
+    t.setReadings(reading('s1', 50));
+    t.monitor.start();
+    await flush();
+    t.source.read.mockRejectedValueOnce(new Error('down'));
+    vi.advanceTimersByTime(15 * MINUTE_MS);
+    await flush();
+    t.source.read.mockImplementationOnce(() => new Promise(() => {}));
+    vi.advanceTimersByTime(15 * MINUTE_MS);
+    await flush();
+    vi.advanceTimersByTime(POLL_DEADLINE_MS);
+    await flush();
+
+    expect(t.monitor.status().polls).toEqual({ ok: 1, failed: 1, hung: 1 });
+    await t.monitor.stop();
   });
 });

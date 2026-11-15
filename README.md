@@ -22,10 +22,11 @@ is; the conductor only adds water on top when the sensors say the schedule isn't
 - **Tells you what happened.** Every watering and connection event goes to an audit trail you can
   review with `npm run audit`. Alerts (low batteries, critically dry or wet soil, controller offline)
   can be sent to Telegram.
-- **Answers questions, and takes orders** (optional). Ask the Telegram bot for `/status`,
-  `/sensors_read`, `/bhyve_devices` or the `/audit` trail (read-only). With a passphrase set, `/pause`
-  and `/resume` switch automatic watering off and on, and `/config` changes a zone's watering settings.
-  Commands only work from your chat, for the people you list, and changes always ask for the passphrase.
+- **Answers questions, and takes orders** (optional). Ask the Telegram bot for `/health`, one `/zone`,
+  `/sensors_read`, `/bhyve_devices` or the `/audit` trail (read-only); `/stop` turns the water off now.
+  With a passphrase set, `/pause` (for a while, or until `/resume`) and `/resume` switch automatic watering
+  off and on, and `/config` changes a zone's watering settings. Commands only work from your chat, for the
+  people you list, and changes always ask for the passphrase.
 
 ## Who it's for
 

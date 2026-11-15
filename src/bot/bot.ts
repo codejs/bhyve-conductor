@@ -22,11 +22,12 @@ import {
   type BotCommand,
   type ConversationCommand,
   type QueryCommand,
+  type RunResult,
   type Step,
 } from './conversation.ts';
 import { clip, duration, safe } from './format.ts';
 import { classifyAttempt, PassphraseGate, type GateResult } from './gate.ts';
-import { BUILT_IN_HELP, HELP_ALIASES, helpFor, helpIndex } from './help.ts';
+import { BUILT_IN_HELP, HELP_ALIASES, helpFor, helpIndex, unavailableText } from './help.ts';
 
 /**
  * Answers commands sent to the Telegram bot, using long polling (getUpdates): the conductor only makes
@@ -218,7 +219,7 @@ interface Conversation {
   user: TelegramUser;
   startedMs: number;
   /** The step waiting for an answer (unset until the first one is asked). */
-  step?: Exclude<Step, { kind: 'done' }>;
+  step?: Extract<Step, { kind: 'input' | 'passphrase' }>;
   /** Answers that fit nothing, at this step. */
   invalid: number;
   /** What was chosen along the way, for the audit trail. */
@@ -289,6 +290,11 @@ export class CommandBot {
   /** The bot's @username, once Telegram has told us. */
   get username(): string | undefined {
     return this.#username;
+  }
+
+  /** How much longer changes are locked after wrong passphrases (0 if they aren't), for /health. */
+  get changesLockedForMs(): number {
+    return this.#gate?.lockedForMs(this.#clock.now().getTime()) ?? 0;
   }
 
   /** The command being answered, if any (for tests and status). */
@@ -434,7 +440,11 @@ export class CommandBot {
 
     const command = parsed ? this.#registry.get(parsed.name) : undefined;
     if (!parsed || (!command && !BUILT_IN.has(parsed.name))) {
-      this.#deps.reply(`🤷 Unknown command${parsed ? ` /${safe(parsed.name, 32)}` : ''}. Send /help for the list.`);
+      // A command that exists but is off here (or was replaced) says why.
+      const why = parsed ? this.#deps.unavailable?.get(parsed.name) : undefined;
+      this.#deps.reply(
+        parsed && why ? unavailableText(parsed.name, why) : `🤷 Unknown command${parsed ? ` /${safe(parsed.name, 32)}` : ''}. Send /help for the list.`,
+      );
       return;
     }
     if (HELP_ALIASES.has(parsed.name)) {
@@ -447,14 +457,23 @@ export class CommandBot {
       );
       return;
     }
-    if (parsed.args !== '' && !(command && command.kind !== 'query' && command.acceptsArgs)) {
-      // Text after a change's command could be the passphrase, sent along with it by mistake.
-      const note =
-        command?.kind === 'mutable' && classifyAttempt(parsed.args) === 'attempt'
-          ? ` Send it alone; I ask for the passphrase when it's needed. ${deletedNote(await this.#deleteMessage(message))}`
-          : '';
-      this.#deps.reply(`⚠️ /${parsed.name} takes no arguments.${note}`);
-      return;
+    const acceptsArgs = command !== undefined && command.kind !== 'query' && command.acceptsArgs === true;
+    if (parsed.args !== '') {
+      // Text after a change's command that could be the passphrase, sent along with it by mistake: delete it,
+      // and run nothing (whatever the command accepts: no valid argument is that long).
+      if (command?.kind === 'mutable' && classifyAttempt(parsed.args) === 'attempt') {
+        const deleted = deletedNote(await this.#deleteMessage(message));
+        this.#deps.reply(
+          acceptsArgs
+            ? `⚠️ /${parsed.name} was not run (see /help ${parsed.name}); I ask for the passphrase when it's needed. ${deleted}`
+            : `⚠️ /${parsed.name} takes no arguments. Send it alone; I ask for the passphrase when it's needed. ${deleted}`,
+        );
+        return;
+      }
+      if (!acceptsArgs) {
+        this.#deps.reply(`⚠️ /${parsed.name} takes no arguments.`);
+        return;
+      }
     }
     if (!command) {
       await this.#cancelCommand(user); // the only other built-in
@@ -574,7 +593,9 @@ export class CommandBot {
     const current = this.#conversation;
     if (current) {
       const other = current.user.id !== user.id;
-      if (other && current.command.kind === 'mutable') {
+      // Someone else's change is never interfered with, except by a safety command: stopping the water
+      // must never wait.
+      if (other && current.command.kind === 'mutable' && command.kind !== 'safety') {
         // Someone else's change in progress is never interfered with.
         await this.#say(`⏳ ${safe(actorName(current.user))} is answering /${current.command.name}. Try again when that's done.`);
         return;
@@ -582,7 +603,7 @@ export class CommandBot {
       this.#end(current, 'superseded');
       // Read-only browsing gives way (it must never hold up e.g. a /pause).
       if (other) await this.#say(`👋 ${safe(actorName(current.user))}'s /${current.command.name} was closed for /${command.name}.`);
-      else if (current.command.kind === 'mutable') await this.#say(`✋ The pending /${current.command.name} was cancelled.`);
+      else if (current.command.kind !== 'interactive') await this.#say(`✋ The pending /${current.command.name} was cancelled.`);
     }
 
     const conversation: Conversation = { command, user, startedMs: nowMs, invalid: 0 };
@@ -613,11 +634,22 @@ export class CommandBot {
       await this.#say(step.text);
       return;
     }
-    if (step.kind === 'passphrase' && conversation.command.kind !== 'mutable') {
-      // Fail closed: only a command registered as mutable may run anything behind the passphrase.
-      log.error(`Telegram commands: read-only /${conversation.command.name} asked for the passphrase; refused`);
-      this.#end(conversation, 'failed', 'a read-only command asked for the passphrase');
+    // Fail closed: only a command registered as mutable may run anything behind the passphrase, and only
+    // a safety command may act without it.
+    const misfit =
+      (step.kind === 'passphrase' && conversation.command.kind !== 'mutable') || (step.kind === 'act' && conversation.command.kind !== 'safety');
+    if (misfit) {
+      log.error(`Telegram commands: ${conversation.command.kind} /${conversation.command.name} asked for a ${step.kind} step; refused`);
+      this.#end(conversation, 'failed', `a ${conversation.command.kind} command asked for a ${step.kind} step`);
       await this.#say(`❌ /${conversation.command.name} failed (internal error). Nothing changed.`);
+      return;
+    }
+    if (step.kind === 'act') {
+      // Stop waiting for answers: the action runs now (and may take a moment).
+      this.#clock.clearTimeout(conversation.timer);
+      await this.#say(step.text);
+      if (this.#conversation !== conversation) return;
+      await this.#finish(conversation, () => step.run(), '');
       return;
     }
     conversation.step = step;
@@ -640,7 +672,7 @@ export class CommandBot {
     const name = conversation.command.name;
     this.#end(conversation, 'expired');
     // Browsing just ends quietly; a change that was being confirmed must say it didn't happen.
-    if (conversation.command.kind === 'mutable') {
+    if (conversation.command.kind !== 'interactive') {
       void this.#say(`⌛ No answer within ${duration(this.#opts.conversationTimeoutMs)}: /${name} cancelled. Nothing changed.`);
     }
   }
@@ -692,14 +724,19 @@ export class CommandBot {
       await this.#wrongPassphrase(conversation, check, note);
       return;
     }
-    const result = await this.#guard(() => step.run());
+    await this.#finish(conversation, () => step.run(), note);
+  }
+
+  /** Runs the change of a passphrase or act step, ends the conversation, and says how it went. */
+  async #finish(conversation: Conversation, run: () => Promise<RunResult>, note: string): Promise<void> {
+    const result = await this.#guard(run);
     if (this.#conversation !== conversation) return;
     const name = conversation.command.name;
     if (!result.ok) {
       this.#end(conversation, result.outcome, result.error);
       if (result.outcome !== 'stopped') {
         log.warn(`Telegram commands: /${name} failed: ${result.error ?? result.outcome}`);
-        await this.#say(`❌ /${name} failed: ${safe(result.error, 300)}. It may or may not have taken effect: check /status.${note}`);
+        await this.#say(`❌ /${name} failed: ${safe(result.error, 300)}. It may or may not have taken effect: check /health.${note}`);
       }
       return;
     }
@@ -716,7 +753,7 @@ export class CommandBot {
     conversation.invalid++;
     if (conversation.invalid >= this.#opts.maxInvalidAnswers) {
       this.#end(conversation, 'aborted');
-      const ending = conversation.command.kind === 'mutable' ? 'cancelled. Nothing changed.' : 'closed.';
+      const ending = conversation.command.kind !== 'interactive' ? 'cancelled. Nothing changed.' : 'closed.';
       await this.#say(`🤷 Too many unexpected answers: /${conversation.command.name} ${ending}`);
       return;
     }
@@ -766,7 +803,7 @@ export class CommandBot {
   }
 
   #cancelledText(conversation: Conversation): string {
-    return conversation.command.kind === 'mutable'
+    return conversation.command.kind !== 'interactive'
       ? `✋ /${conversation.command.name} cancelled. Nothing changed.`
       : `👋 /${conversation.command.name} closed.`;
   }

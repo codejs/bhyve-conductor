@@ -101,6 +101,15 @@ describe('FileStateStore', () => {
     expect(loaded.sequences).toEqual([sequence()]);
   });
 
+  it('remembers when a pause ends', async () => {
+    const store = new FileStateStore(path);
+    const until = new Date(NOW.getTime() + 3_600_000);
+    await store.save({ history: new WateringHistory(), sequences: [], alerts: {}, paused: { since: NOW, by: 'x', until } });
+
+    expect(JSON.parse(await readFile(path, 'utf8')).paused).toEqual({ since: NOW.toISOString(), by: 'x', until: until.toISOString() });
+    expect((await store.load()).paused).toEqual({ since: NOW, by: 'x', until });
+  });
+
   it('writes nothing about pausing when not paused, and reads older files as not paused', async () => {
     const store = new FileStateStore(path);
     await store.save({ history: new WateringHistory(), sequences: [], alerts: {} });

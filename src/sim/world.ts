@@ -221,6 +221,20 @@ export class SimWorld {
       for (const l of this.#listeners) l({ event: 'watering_in_progress_notification', device_id: deviceId });
       return Promise.resolve();
     },
+    stopWatering: (deviceId: string) => {
+      this.update();
+      if (this.services.bhyveSocket === 'down') return Promise.reject(new Error('B-hyve socket did not open within 15s'));
+      if (this.services.bhyveSocket === 'hang') return new Promise<never>(() => {});
+      // The water goes off now: what's running ends here, what was still to come doesn't happen.
+      const now = this.clock.now().getTime();
+      for (let i = this.#segments.length - 1; i >= 0; i--) {
+        const seg = this.#segments[i];
+        if (!seg || !seg.zone.startsWith(`${deviceId}:`) || seg.end <= now) continue;
+        if (seg.start >= now) this.#segments.splice(i, 1);
+        else seg.end = now;
+      }
+      return Promise.resolve();
+    },
   };
 
   /** Fake Open-Meteo. */

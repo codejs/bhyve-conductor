@@ -17,8 +17,9 @@
 Notifications are off if neither variable is set, and always off in dry-run mode (`--dry-run`,
 `npm run conductor:check`).
 
-The same bot can also answer commands from this chat: read-only ones (`/status`, `/sensors_read`,
-`/bhyve_devices`, `/audit`), and `/pause`, `/resume` and `/config` with a passphrase; see [telegram-commands.md](telegram-commands.md).
+The same bot can also answer commands from this chat: read-only ones (`/health`, `/zone`, `/sensors_read`,
+`/bhyve_devices`, `/audit`), `/stop` to turn the water off, and `/pause`, `/resume` and `/config` with a
+passphrase; see [telegram-commands.md](telegram-commands.md).
 
 ## What you get
 
@@ -56,6 +57,8 @@ Every notification comes from an audit event, so anything you were told about is
 | Monitoring got stuck (watchdog) | critical | ⏳ Monitoring got stuck and was restarted |
 | State file can't be written | critical | 💾 Can't save state |
 | Restarted while [paused](telegram-commands.md#pausing-and-resuming) (the pause survives restarts) | warning | ⏸️ Restarted while paused … |
+| Still paused, with no end, after a day (then daily) | warning | ⏸️ Still paused after … |
+| A pause set for a while (`/pause 4h`) ended on its own | info | ▶️ The pause is over … |
 | Someone not allowed sent a bot command (only with [commands](telegram-commands.md) on; at most once an hour per sender) | warning | 🚫 Ignored a bot command … |
 
 ### Keeping it quiet

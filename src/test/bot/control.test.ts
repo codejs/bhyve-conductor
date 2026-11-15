@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildControlCommands, formatPaused, formatResumed, type ConductorControl } from '../../bot/control.ts';
 import type { MutableCommand, Step } from '../../bot/conversation.ts';
 import type { ConductorStatus, PauseResult, ResumeResult, SequenceStatus } from '../../conductor/monitor.ts';
+import { conductorStatus } from '../utils/bot.ts';
 import { minutesAgo, NOW } from '../utils/conductor.ts';
 
 const MIN = 60_000;
@@ -22,19 +23,7 @@ const sequence = (overrides: Partial<SequenceStatus> = {}): SequenceStatus => ({
   ...overrides,
 });
 
-const status = (overrides: Partial<ConductorStatus> = {}): ConductorStatus => ({
-  at: NOW,
-  running: true,
-  dryRun: false,
-  pollIntervalMinutes: 15,
-  polling: false,
-  zones: [],
-  sequences: [],
-  wateringNow: [],
-  outages: [],
-  alerts: [],
-  ...overrides,
-});
+const status = (overrides: Partial<ConductorStatus> = {}): ConductorStatus => conductorStatus(overrides);
 
 const setup = (s: ConductorStatus = status()) => {
   const pauseResult: PauseResult = { changed: true, paused: { since: NOW, by: '@owner via Telegram' }, held: [], wateringNow: [], sendInProgress: false };
@@ -44,7 +33,7 @@ const setup = (s: ConductorStatus = status()) => {
     pause: vi.fn(async (_by: string) => pauseResult),
     resume: vi.fn(async (_by: string, _held: 'continue' | 'discard') => resumeResult),
   } satisfies ConductorControl;
-  const [pause, resume] = buildControlCommands({ control, timeZone: 'UTC' }) as [MutableCommand, MutableCommand];
+  const [pause, resume] = buildControlCommands({ control, timeZone: 'UTC', now: () => NOW }) as [MutableCommand, MutableCommand];
   return { control, pause, resume };
 };
 
@@ -89,13 +78,13 @@ describe('control commands', () => {
       expect(t.control.pause).not.toHaveBeenCalled();
 
       await run(step);
-      expect(t.control.pause).toHaveBeenCalledWith('@owner via Telegram');
+      expect(t.control.pause).toHaveBeenCalledWith('@owner via Telegram', {});
     });
 
     it('names the user by id when they have no username', async () => {
       const t = setup();
       await run(await t.pause.begin({ id: 77 }, ''));
-      expect(t.control.pause).toHaveBeenCalledWith('user 77 via Telegram');
+      expect(t.control.pause).toHaveBeenCalledWith('user 77 via Telegram', {});
     });
 
     it('when watering is in progress: asks to confirm first, explaining what a pause does and does not do', async () => {
@@ -143,7 +132,7 @@ describe('control commands', () => {
       const t = setup(status({ paused: { since: minutesAgo(90), by: '@family via Telegram' } }));
       expect(await begin(t.pause)).toEqual({
         kind: 'done',
-        text: '⏸️ Already paused since Jul 1, 10:30 (by @family via Telegram). Send /resume to resume.',
+        text: '⏸️ Already paused since Jul 1, 10:30 (by @family via Telegram), until /resume. Send /resume to resume, or /pause 4h to make it end on its own.',
       });
     });
 
@@ -156,6 +145,66 @@ describe('control commands', () => {
       );
       const step = await begin(t.pause);
       wellFormed(step.text);
+    });
+  });
+
+  describe('/pause for a while', () => {
+    const pauseFor = (t: ReturnType<typeof setup>, args: string) => Promise.resolve(t.pause.begin(OWNER, args));
+
+    it('pauses until a given time', async () => {
+      const t = setup();
+      const step = await pauseFor(t, '4h');
+
+      expect(step).toMatchObject({
+        kind: 'passphrase',
+        text: '⏸️ Pause automatic watering for 4 h (until Jul 1, 16:00)? Nothing is being watered right now.\n🔐 Send the passphrase to pause, or <b>cancel</b>.',
+      });
+      await run(step);
+      expect(t.control.pause).toHaveBeenCalledWith('@owner via Telegram', { until: new Date(NOW.getTime() + 4 * 60 * MIN) });
+    });
+
+    it('says how long in the confirmation when watering is in progress', async () => {
+      const t = setup(status({ sequences: [sequence()] }));
+      const step = await pauseFor(t, '90m');
+      expect(step.kind === 'input' && step.text).toContain('Pause anyway for 1.5 h (until Jul 1, 13:30)? Reply <b>yes</b> or <b>cancel</b>.');
+      await run(await choose(step, 'yes'));
+      expect(t.control.pause).toHaveBeenCalledWith('@owner via Telegram', { until: new Date(NOW.getTime() + 90 * MIN) });
+    });
+
+    it('changes when an existing pause ends (after the passphrase)', async () => {
+      const t = setup(status({ paused: { since: minutesAgo(60), by: '@family via Telegram' } }));
+      const step = await pauseFor(t, '2d');
+
+      expect(step).toMatchObject({
+        kind: 'passphrase',
+        text:
+          '⏸️ Already paused since Jul 1, 11:00 (by @family via Telegram), until /resume.\nMake it end at Jul 3, 12:00 instead?\n' +
+          '🔐 Send the passphrase to change when the pause ends, or <b>cancel</b>.',
+      });
+      await run(step);
+      expect(t.control.pause).toHaveBeenCalledWith('@owner via Telegram', { until: new Date(NOW.getTime() + 2 * 24 * 60 * MIN) });
+    });
+
+    it('says when an existing pause ends, when asked without a time', async () => {
+      const t = setup(status({ paused: { since: minutesAgo(60), by: 'x', until: new Date(NOW.getTime() + 60 * MIN) } }));
+      expect(await pauseFor(t, '')).toMatchObject({ kind: 'done', text: expect.stringContaining('until Jul 1, 13:00. Send /resume to resume') });
+    });
+
+    it.each([
+      ['tomorrow', 'Give a time like 90m, 4h or 2d (between 5 min and 30 days).'],
+      ['2m', 'The time must be between 5 min and 30 days.'],
+      ['31d', 'The time must be between 5 min and 30 days.'],
+      ['4h 2h', 'Give a time like 90m, 4h or 2d (between 5 min and 30 days).'],
+    ])('refuses %j without repeating it, and changes nothing', async (args, problem) => {
+      const t = setup();
+      expect(await pauseFor(t, args)).toEqual({ kind: 'done', text: `⚠️ ${problem} For example: /pause, or /pause 4h.` });
+      expect(t.control.pause).not.toHaveBeenCalled();
+    });
+
+    it('mentions the end in /resume', async () => {
+      const t = setup(status({ paused: { since: minutesAgo(45), by: 'x', until: new Date(NOW.getTime() + 60 * MIN) } }));
+      const step = await t.resume.begin(OWNER, '');
+      expect(step.kind === 'passphrase' && step.text).toContain('Paused since Jul 1, 11:15 by x (it ends on its own at Jul 1, 13:00).');
     });
   });
 
@@ -290,6 +339,26 @@ describe('formatPaused', () => {
 
   it('escapes', () => {
     wellFormed(formatPaused({ ...base, paused: { since: NOW, by: EVIL }, held: [sequence({ zoneNames: [EVIL] })], wateringNow: [{ deviceId: EVIL, zoneNames: [], cycle: 1, of: 1, until: NOW }] }, at));
+  });
+});
+
+describe('formatPaused with an end', () => {
+  const paused: PauseResult = { changed: true, paused: { since: NOW, by: '@owner via Telegram', until: new Date(NOW.getTime() + 4 * 60 * MIN) }, held: [], wateringNow: [], sendInProgress: false };
+
+  it('says when it ends, and what happens then', () => {
+    expect(formatPaused(paused, at)).toBe(
+      [
+        '⏸️ <b>Paused</b> by @owner via Telegram until 16:00. No supplemental watering until then (or /resume).',
+        'Sensors are still read and alerts still sent; your B-hyve schedule runs as usual.',
+        'When the pause ends, watering on hold is cancelled and the zones are re-checked.',
+      ].join('\n'),
+    );
+  });
+
+  it('confirms a changed end', () => {
+    expect(formatPaused({ ...paused, changed: false, updated: true }, at)).toBe(
+      '⏸️ The pause now ends at 16:00; then automatic watering resumes on its own (watering on hold is cancelled, and the zones re-checked).',
+    );
   });
 });
 

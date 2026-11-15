@@ -7,9 +7,11 @@
  *   npm run conductor:check     one dry-run cycle, then exit (good for checking the config)
  *   npm run audit               review what happened (watering, outages, recoveries)
  * With TELEGRAM_COMMANDS=on, the Telegram chat can also ask for /status, /sensors_read and
- * /bhyve_devices and /audit, and with TELEGRAM_COMMAND_PASSPHRASE set, /pause and /resume automatic
- * watering and change zone settings with /config (see docs/telegram-commands.md).
+ * /bhyve_devices, /health, /zone and /audit, stop the water with /stop, and with TELEGRAM_COMMAND_PASSPHRASE
+ * set, /pause and /resume automatic watering and change zone settings with /config
+ * (see docs/telegram-commands.md).
  */
+import { readFileSync, statSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { FileAuditLog, lastAuditEvent, readAuditTail, teeAudit, type AuditSink } from './audit/audit.ts';
 import { BhyveClient } from './bhyve/client.ts';
@@ -17,7 +19,7 @@ import { commandPolicy } from './bot/auth.ts';
 import { CommandBot } from './bot/bot.ts';
 import { zonesBySensor } from './bot/commands.ts';
 import { passphraseProblem } from './bot/gate.ts';
-import { buildBotCommands, unavailableCommands } from './bot/registry.ts';
+import { buildBotCommands, conductorCommandDeps, unavailableCommands } from './bot/registry.ts';
 import { assertForecastReady, loadConductorConfig } from './conductor/config.ts';
 import { ConfigEditor } from './conductor/config-editor.ts';
 import { Monitor } from './conductor/monitor.ts';
@@ -37,6 +39,27 @@ import type { WeatherProvider } from './weather/types.ts';
 const SEND_GRACE_MS = 3_000;
 /** /audit reads at most this much of the end of the audit file (it grows forever). */
 const AUDIT_TAIL_BYTES = 2 * 1024 * 1024;
+
+/** This package's version, for /health. */
+const VERSION = ((): string => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? `v${pkg.version}` : 'unknown version';
+  } catch {
+    return 'unknown version';
+  }
+})();
+
+/** A file's size, or undefined if it isn't there (for /health: sizes only, never paths). */
+const sizeOf = (path: string): number | undefined => {
+  try {
+    return statSync(path).size;
+  } catch {
+    return undefined;
+  }
+};
+
+const optionalSize = (bytes: number | undefined): { bytes?: number } => (bytes === undefined ? {} : { bytes });
 
 const main = async (): Promise<void> => {
   const { values: args } = parseArgs({
@@ -162,26 +185,31 @@ const main = async (): Promise<void> => {
   let bot: CommandBot | undefined;
   if (policy && telegram && queue && !args.once) {
     const q = queue;
-    const commandDeps: Parameters<typeof buildBotCommands>[0] = {
-      // Only the read-only call is handed over, so no chat message can ever reach a watering command.
-      bhyve: { getDevices: () => bhyve.getDevices() },
+    const commandDeps = conductorCommandDeps({
+      monitor,
+      config,
+      bhyve,
       // Its own source, so a command's read can't interfere with the monitor's (same Tuya client and token).
       sensors: new TuyaSoilSource(tuya, { sensorIds: [...new Set(config.zones.flatMap((z) => z.sensorIds))], moistureCode: env.TUYA_MOISTURE_CODE }),
       zonesBySensor: zonesBySensor(config.zones),
-      status: () => monitor.status(),
-      timeZone: config.notifications.timeZone,
       readAudit: () => readAuditTail(env.CONDUCTOR_AUDIT, AUDIT_TAIL_BYTES),
-      // Changes only exist with a passphrase (the bot refuses them without one anyway). They get just the
-      // three monitor calls they need, and an editor of `config`: the very object the monitor runs with.
-      ...(passphrase === undefined
-        ? {}
-        : {
-            changes: {
-              control: { status: () => monitor.status(), pause: (by) => monitor.pause(by), resume: (by, held) => monitor.resume(by, held) },
-              editor: new ConfigEditor({ path: env.CONDUCTOR_CONFIG, config, audit }),
-            },
-          }),
-    };
+      service: () => ({
+        version: VERSION,
+        node: process.version,
+        uptimeMs: process.uptime() * 1000,
+        memoryBytes: process.memoryUsage().rss,
+        files: [
+          { name: 'audit trail', ...optionalSize(sizeOf(env.CONDUCTOR_AUDIT)) },
+          { name: 'state', ...optionalSize(sizeOf(env.CONDUCTOR_STATE)) },
+          { name: 'settings', ...optionalSize(sizeOf(env.CONDUCTOR_CONFIG)) },
+        ],
+        notifications: q.stats(),
+        commandsLockedForMs: bot?.changesLockedForMs ?? 0,
+      }),
+      timeZone: config.notifications.timeZone,
+      // Changes (/pause, /resume, /config) only exist with a passphrase (the bot refuses them without one anyway).
+      ...(passphrase === undefined ? {} : { editor: new ConfigEditor({ path: env.CONDUCTOR_CONFIG, config, audit }) }),
+    });
     bot = new CommandBot({
       api: telegram,
       policy,

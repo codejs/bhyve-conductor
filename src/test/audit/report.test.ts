@@ -149,6 +149,29 @@ describe('describe / formatEvent', () => {
     );
   });
 
+  it('describes timed pauses, reminders and stops', () => {
+    const d = (type: AuditEvent['type'], data: Record<string, unknown>) => describeEvent(ev(NOW.toISOString(), type, data), 'UTC');
+    expect(d('conductor.paused', { by: 'x', held: [], until: NOW.toISOString() })).toBe('conductor PAUSED by x until 2026-07-01 12:00:00');
+    expect(d('conductor.resumed', { by: 'the end of the pause', auto: true, pausedMinutes: 240, held: 'discard' })).toBe(
+      'conductor resumed (pause over) by the end of the pause after 240 min (held sequences: discard; continued: none; discarded: none)',
+    );
+    expect(d('conductor.pause_changed', { by: 'x', until: NOW.toISOString(), previousUntil: NOW.toISOString() })).toBe(
+      'pause now ends 2026-07-01 12:00:00 (changed by x; was 2026-07-01 12:00:00)',
+    );
+    expect(d('conductor.pause_changed', { by: 'x', until: NOW.toISOString() })).toBe('pause now ends 2026-07-01 12:00:00 (changed by x)');
+    expect(d('conductor.pause_reminder', { since: NOW.toISOString(), by: 'x', pausedHours: 48 })).toBe('still PAUSED after 48 h (since 2026-07-01 12:00:00 by x)');
+    expect(
+      d('watering.stopped', {
+        by: '@owner via Telegram',
+        devices: [
+          { device: 'dev1', sent: true, check: 'off', cancelled: 'abc' },
+          { device: 'dev2', sent: false, error: 'socket down' },
+        ],
+      }),
+    ).toBe('watering STOPPED by @owner via Telegram: dev1: stop sent, B-hyve says off, cancelled seq abc; dev2: NOT SENT (socket down)');
+    expect(d('watering.stopped', { by: 'x' })).toBe('watering STOPPED by x: ');
+  });
+
   it('describes a change of settings', () => {
     const e = ev(NOW.toISOString(), 'config.changed', {
       by: '@owner via Telegram',

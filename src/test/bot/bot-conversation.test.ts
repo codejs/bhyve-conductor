@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot, type CommandBotOptions } from '../../bot/bot.ts';
-import { ask, type BotCommand, type InteractiveCommand, type MutableCommand, type QueryCommand, type Step } from '../../bot/conversation.ts';
+import { act, ask, confirm, type BotCommand, type InteractiveCommand, type MutableCommand, type QueryCommand, type SafetyCommand, type Step } from '../../bot/conversation.ts';
 import { VirtualClock } from '../../clock.ts';
 import { log } from '../../log.ts';
 import type { TelegramMessage, TelegramUpdate } from '../../notify/telegram.ts';
@@ -947,7 +947,7 @@ describe('CommandBot conversations', () => {
 
       await t.send('/now', PASS);
 
-      expect(t.said().at(-1)).toBe('❌ /now failed: could not save state. It may or may not have taken effect: check /status.');
+      expect(t.said().at(-1)).toBe('❌ /now failed: could not save state. It may or may not have taken effect: check /health.');
       expect(t.handled()).toEqual([expect.objectContaining({ outcome: 'failed', error: 'could not save state' })]);
     });
 
@@ -959,7 +959,7 @@ describe('CommandBot conversations', () => {
       await t.send('/now', PASS);
       await t.clock.advanceBy(10 * SEC);
 
-      expect(t.said().at(-1)).toBe('❌ /now failed: no answer within 10 s. It may or may not have taken effect: check /status.');
+      expect(t.said().at(-1)).toBe('❌ /now failed: no answer within 10 s. It may or may not have taken effect: check /health.');
       expect(t.handled()).toEqual([expect.objectContaining({ outcome: 'timed_out' })]);
       expect(t.bot.pendingConversation).toBeUndefined();
     });
@@ -1296,7 +1296,7 @@ describe('CommandBot conversations', () => {
       expect(t.said()).toEqual(['❌ /sneaky failed (internal error). Nothing changed.']);
       expect(t.bot.pendingConversation).toBeUndefined();
       expect(t.handled()).toEqual([expect.objectContaining({ command: 'sneaky', outcome: 'failed' })]);
-      expect(logs[3]).toHaveBeenCalledWith('Telegram commands: read-only /sneaky asked for the passphrase; refused');
+      expect(logs[3]).toHaveBeenCalledWith('Telegram commands: interactive /sneaky asked for a passphrase step; refused');
     });
 
     it('works during a lockout (read-only), while changes stay locked', async () => {
@@ -1485,6 +1485,171 @@ describe('CommandBot conversations', () => {
 
       expect(t.replies).toHaveLength(3);
       expect(t.replies[2]).toBe('🐢 Too many commands; ignoring them for up to 60 s.');
+    });
+  });
+
+  describe('safety commands (confirm, no passphrase)', () => {
+    const halt = () => {
+      const run = vi.fn(async (): Promise<string | { text: string; error: string }> => '🛑 Halted');
+      const command: SafetyCommand = {
+        kind: 'safety',
+        name: 'halt',
+        description: 'Halt',
+        begin: () => confirm({ text: 'Halt now? Reply yes or cancel.', hint: 'Reply yes or cancel.', then: () => act('🛑 Halting…', run) }),
+      };
+      return { command, run };
+    };
+    const setupHalt = (opts: Parameters<typeof setup>[0] = {}) => {
+      const h = halt();
+      const s2 = scripted();
+      const t = setup({ ...opts, commands: [statusCommand(), h.command, s2.pause, s2.now] });
+      return { ...t, halt: h, pauseRun: s2.pauseRun };
+    };
+
+    it('acts right after the confirmation, saying first what it is doing, without the passphrase', async () => {
+      const t = setupHalt();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/halt', 'yes');
+
+      expect(t.halt.run).toHaveBeenCalledOnce();
+      expect(t.said()).toEqual(['Halt now? Reply yes or cancel.', '🛑 Halting…', '🛑 Halted']);
+      expect(t.said().some((x) => x.includes('passphrase'))).toBe(false);
+      expect(t.fake.deleted).toEqual([]);
+      expect(t.handled()).toEqual([expect.objectContaining({ command: 'halt', outcome: 'ok', choice: 'yes' })]);
+      expect(t.bot.pendingConversation).toBeUndefined();
+    });
+
+    it('does nothing without the confirmation', async () => {
+      const t = setupHalt();
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/halt', 'cancel');
+      await t.send('/halt');
+      await t.clock.advanceBy(2 * MIN);
+
+      expect(t.halt.run).not.toHaveBeenCalled();
+      expect(t.said()).toContain('✋ /halt cancelled. Nothing changed.');
+      expect(t.said()).toContain('⌛ No answer within 2 min: /halt cancelled. Nothing changed.');
+    });
+
+    it('works while changes are locked', async () => {
+      const t = setupHalt({ options: { maxPassphraseFailures: 1 } });
+      active.push(t.bot);
+      await t.start();
+      await t.send('/now', 'wrong passphrase');
+      expect(t.bot.changesLockedForMs).toBeGreaterThan(0);
+
+      await t.send('/halt', 'yes');
+
+      expect(t.halt.run).toHaveBeenCalledOnce();
+    });
+
+    it("goes ahead of someone else's pending change (stopping the water must never wait)", async () => {
+      const t = setupHalt({ policy: GROUP });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send(['/pause', inGroup(OWNER)], ['/halt', inGroup(FAMILY)]);
+
+      expect(t.said()).toContain("👋 @owner's /pause was closed for /halt.");
+      await t.send(['yes', inGroup(FAMILY)]);
+      expect(t.halt.run).toHaveBeenCalledOnce();
+      expect(t.handled()[0]).toMatchObject({ command: 'pause', outcome: 'superseded' });
+    });
+
+    it('reports a failure, without pretending to know what happened', async () => {
+      const t = setupHalt();
+      t.halt.run.mockRejectedValueOnce(new Error('socket closed'));
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/halt', 'yes');
+
+      expect(t.said().at(-1)).toBe('❌ /halt failed: socket closed. It may or may not have taken effect: check /health.');
+      expect(t.handled()).toEqual([expect.objectContaining({ outcome: 'failed', error: 'socket closed' })]);
+    });
+
+    it('records an action that says it did not go through as failed', async () => {
+      const t = setupHalt();
+      t.halt.run.mockResolvedValueOnce({ text: '❌ not sent', error: 'stop not sent to dev1' });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/halt', 'yes');
+
+      expect(t.said().at(-1)).toBe('❌ not sent');
+      expect(t.handled()).toEqual([expect.objectContaining({ outcome: 'failed', error: 'stop not sent to dev1' })]);
+    });
+
+    it.each(['mutable', 'interactive'] as const)('refuses an act step from a %s command (fails closed)', async (kind) => {
+      const run = vi.fn(async () => 'acted');
+      const sneaky = { kind, name: 'sneaky', description: 'x', begin: () => act('Acting…', run) } as MutableCommand | InteractiveCommand;
+      const t = setup({ commands: [sneaky, scripted().pause] });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/sneaky');
+
+      expect(run).not.toHaveBeenCalled();
+      expect(t.said()).toEqual(['❌ /sneaky failed (internal error). Nothing changed.']);
+    });
+
+    it('refuses a passphrase step from a safety command (fails closed)', async () => {
+      const run = vi.fn(async () => 'ran');
+      const sneaky: SafetyCommand = { kind: 'safety', name: 'sneaky', description: 'x', begin: () => ({ kind: 'passphrase', text: 'Passphrase?', run }) };
+      const t = setup({ commands: [sneaky, scripted().pause] });
+      active.push(t.bot);
+      await t.start();
+
+      await t.send('/sneaky');
+
+      expect(t.said()).toEqual(['❌ /sneaky failed (internal error). Nothing changed.']);
+    });
+  });
+
+  describe('arguments of a change that takes them', () => {
+    it('deletes text that could be the passphrase and runs nothing (no valid argument is that long)', async () => {
+      const begin = vi.fn((): Step => ({ kind: 'passphrase', text: '🔐 Passphrase?', run: async () => 'ok' }));
+      const timed: MutableCommand = { kind: 'mutable', name: 'timed', description: 'x', acceptsArgs: true, begin };
+      const t = track(setup({ commands: [timed] }));
+      await t.start();
+
+      const [long] = await t.send(`/timed ${PASS}`);
+      await t.send('/timed 4h');
+
+      expect(t.fake.deleted).toEqual([long?.message?.message_id]);
+      expect(t.replies[0]).toBe("⚠️ /timed was not run (see /help timed); I ask for the passphrase when it's needed. I deleted your message in case it was the passphrase.");
+      expect(begin).toHaveBeenCalledOnce();
+      expect(begin).toHaveBeenCalledWith(expect.anything(), '4h');
+      expectNoLeak(t);
+    });
+  });
+
+  describe('replaced and switched-off commands', () => {
+    it('says why, instead of "unknown command"', async () => {
+      const clock = new VirtualClock(START);
+      const fake = fakeBotApi();
+      const replies: string[] = [];
+      const bot = new CommandBot({
+        api: fake.bot,
+        policy: PRIVATE,
+        commands: [statusCommand()],
+        unavailable: new Map([['health', 'it was replaced by /status2.']]),
+        reply: (html) => replies.push(html),
+        clock,
+      });
+      active.push(bot);
+      bot.start();
+      await clock.advanceBy(0);
+
+      const msg = updates(clock);
+      fake.push(msg('/health'), msg('/nothing_like_it'));
+      await clock.advanceBy(0);
+
+      expect(replies).toEqual(['⛔ /health is off here: it was replaced by /status2.', '🤷 Unknown command /nothing_like_it. Send /help for the list.']);
     });
   });
 });

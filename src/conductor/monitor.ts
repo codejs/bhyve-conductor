@@ -8,15 +8,15 @@ import { log } from '../log.ts';
 import type { MoistureReading, MoistureSource } from '../sensors/types.ts';
 import type { ForecastHour, WeatherProvider } from '../weather/types.ts';
 import { AlertTracker, type AlertState } from './alerts.ts';
-import type { ConductorConfig } from './config.ts';
+import type { ConductorConfig, ZoneConfig } from './config.ts';
 import type { WateringHistory } from './history.ts';
-import { applyDeviceState, applyForecast, evaluateZone, type DeviceCommand, type ZoneDecision } from './plan.ts';
+import { applyDeviceState, applyForecast, evaluateZone, readingProblem, type DeviceCommand, type ZoneDecision } from './plan.ts';
 import { Sequencer, type HeldSequence, type RunningWave } from './sequencer.ts';
 import type { ConductorState, PauseInfo, PendingSequence } from './state.ts';
 import type { ServiceName } from '../audit/health.ts';
 
 /** The parts of BhyveClient the monitor needs (lets tests pass a fake). */
-export type BhyveControl = Pick<BhyveClient, 'getDevices' | 'getDevice' | 'getPrograms' | 'startWatering' | 'onEvent'>;
+export type BhyveControl = Pick<BhyveClient, 'getDevices' | 'getDevice' | 'getPrograms' | 'startWatering' | 'stopWatering' | 'onEvent'>;
 
 export interface StateStore {
   save(state: ConductorState): Promise<void>;
@@ -42,6 +42,8 @@ export interface MonitorDeps {
   /** Time and timers (default: the system's). `now` overrides just the time. */
   clock?: Clock;
   now?: () => Date;
+  /** How long after stopping the water to ask B-hyve whether it is really off (its status can lag). */
+  stopCheckDelayMs?: number;
 }
 
 export interface CycleResult {
@@ -83,6 +85,60 @@ export interface ConductorStatus {
   outages: { service: ServiceName; since: Date; failures: number; lastError: string }[];
   /** Open alert conditions (low battery, critical moisture, controller offline...). */
   alerts: { key: string; state: string; since: Date }[];
+  /** Polls since start(): finished, failed, and given up on by the watchdog (hung). */
+  polls: { ok: number; failed: number; hung: number };
+}
+
+/** Everything about one zone (for /zone): settings, sensors, watering, limits, alerts. No network calls. */
+export interface ZoneDetail {
+  at: Date;
+  zone: Pick<
+    ZoneConfig,
+    | 'key'
+    | 'name'
+    | 'deviceId'
+    | 'station'
+    | 'thresholdPct'
+    | 'targetPct'
+    | 'runMinutes'
+    | 'maxMinutesPerDay'
+    | 'cooldownMinutes'
+    | 'maxCycleMinutes'
+    | 'soakMinutes'
+    | 'sensorAggregation'
+    | 'maxReadingAgeMinutes'
+    | 'criticalLowPct'
+    | 'criticalHighPct'
+  >;
+  decision?: ConductorStatus['zones'][number]['decision'];
+  /** Each of the zone's sensors, as last read: `problem` says why a reading isn't used (offline, stale...). */
+  sensors: { id: string; name?: string; moisturePct?: number; temperatureC?: number; batteryPct?: number; at?: Date; problem?: string }[];
+  /** Supplemental watering in the last 24 hours, against the daily cap. */
+  usedLastDayMinutes: number;
+  lastRun?: { at: Date; minutes: number };
+  /** Set while the cooldown after the last run is on. */
+  cooldownUntil?: Date;
+  /** The conductor's watering on this zone's controller: in progress or held, and water on now. */
+  sequence?: SequenceStatus;
+  wateringNow?: RunningWave;
+  /** Open alerts about this zone, its sensors or its controller. */
+  alerts: { key: string; state: string; since: Date }[];
+  paused?: PauseInfo;
+}
+
+/** What /stop did on one controller. */
+export interface StopResult {
+  deviceId: string;
+  zoneNames: string[];
+  /** The stop command was sent (B-hyve's command connection took it). */
+  sent: boolean;
+  error?: string;
+  /** The conductor's watering on it that was cancelled (in progress or held). */
+  cancelled?: SequenceStatus;
+  /** A cycle was being sent as it stopped: the stop was sent again once that was over. */
+  resent?: boolean;
+  /** What B-hyve said a moment later. */
+  check: 'off' | 'watering' | 'unknown';
 }
 
 export interface SequenceStatus {
@@ -100,6 +156,8 @@ export interface SequenceStatus {
 export interface PauseResult {
   /** False if it was already paused. */
   changed: boolean;
+  /** It was already paused, and its end time was changed. */
+  updated?: boolean;
   paused: PauseInfo;
   /** Sequences now on hold. */
   held: SequenceStatus[];
@@ -120,6 +178,14 @@ export interface ResumeResult {
 
 /** What to do with held sequences on resume. */
 export type HeldSequenceAction = 'continue' | 'discard';
+
+/** While paused with no end, remind this often (and not before it has lasted this long). */
+export const PAUSE_REMINDER_MS = 24 * 3_600_000;
+/** After a stop during a send, wait at most this long for that send to be over before stopping again. */
+const STOP_RESEND_WAIT_MS = 60_000;
+
+/** The watchdog gave up on a poll. */
+class PollDeadlineError extends Error {}
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -167,6 +233,13 @@ export class Monitor {
   #lastPoll: ConductorStatus['lastPoll'];
   #nextPollAt: Date | undefined;
   #paused: PauseInfo | undefined;
+  /** Ends a pause that has an end time. */
+  #pauseTimer: TimerHandle | undefined;
+  #lastPauseReminder: Date | undefined;
+  /** The last reading of each sensor, and why the others couldn't be read, from the last poll that read them. */
+  #lastReadings = new Map<string, MoistureReading>();
+  #lastSensorErrors = new Map<string, string>();
+  readonly #polls = { ok: 0, failed: 0, hung: 0 };
 
   constructor(deps: MonitorDeps) {
     this.#deps = deps;
@@ -186,14 +259,20 @@ export class Monitor {
     });
     this.#alerts = new AlertTracker(this.#audit, deps.config.alerts, this.#now, deps.alertState);
     if (deps.paused) {
-      this.#paused = { since: new Date(deps.paused.since), by: deps.paused.by };
+      this.#paused = {
+        since: new Date(deps.paused.since),
+        by: deps.paused.by,
+        ...(deps.paused.until ? { until: new Date(deps.paused.until) } : {}),
+      };
       this.#sequencer.pause();
+      // A restart already says it's still paused; the next reminder comes a day later.
+      this.#lastPauseReminder = this.#now();
     }
   }
 
   /** Set while paused. */
   get paused(): PauseInfo | undefined {
-    return this.#paused ? { ...this.#paused, since: new Date(this.#paused.since) } : undefined;
+    return this.#paused ? copyPause(this.#paused) : undefined;
   }
 
   get health(): ConnectionHealth {
@@ -306,6 +385,8 @@ export class Monitor {
       this.#health.failed('tuya', err);
       throw err;
     }
+    this.#lastReadings = new Map(list.map((r) => [r.sensorId, r]));
+    this.#lastSensorErrors = new Map((source.lastErrors ?? []).map((e) => [e.sensorId, e.error]));
     const sensorCount = new Set(config.zones.flatMap((z) => z.sensorIds)).size;
     if (sensorCount > 0 && list.length === 0) {
       const first = source.lastErrors?.[0];
@@ -483,12 +564,152 @@ export class Monitor {
           },
         };
       }),
-      ...(this.#paused ? { paused: { ...this.#paused, since: new Date(this.#paused.since) } } : {}),
+      ...(this.#paused ? { paused: copyPause(this.#paused) } : {}),
       sequences: this.#sequencer.held().map(sequenceStatus),
       wateringNow: this.#sequencer.wateringNow(),
       outages: this.#health.outages(),
-      alerts: Object.entries(this.#alerts.state).map(([key, v]) => ({ key, state: v.state, since: new Date(v.since) })),
+      alerts: this.#openAlerts(),
+      polls: { ...this.#polls },
     };
+  }
+
+  #openAlerts(): { key: string; state: string; since: Date }[] {
+    return Object.entries(this.#alerts.state).map(([key, v]) => ({ key, state: v.state, since: new Date(v.since) }));
+  }
+
+  /** Everything about one zone, or undefined if there's no such zone. No network calls. */
+  zoneStatus(key: string): ZoneDetail | undefined {
+    const zone = this.#deps.config.zones.find((z) => z.key === key);
+    if (!zone) return undefined;
+    const at = this.#now();
+    const history = this.#deps.history;
+    const last = history.lastRun(zone.key);
+    const cooldownUntil = last ? new Date(last.at.getTime() + zone.cooldownMinutes * MINUTE_MS) : undefined;
+    const decision = this.status().zones.find((z) => z.key === key)?.decision;
+    const sequence = this.#sequencer.held().find((h) => h.seq.deviceId === zone.deviceId);
+    const wateringNow = this.#sequencer.wateringNow().find((w) => w.deviceId === zone.deviceId);
+    const sensorKeys = new Set(zone.sensorIds.map((id) => `battery:sensor:${id}`));
+    const alerts = this.#openAlerts().filter(
+      (a) =>
+        a.key.startsWith(`moisture:${zone.key}:`) ||
+        a.key === `daily-limit:${zone.key}` ||
+        a.key === `device:${zone.deviceId}` ||
+        a.key === `battery:device:${zone.deviceId}` ||
+        sensorKeys.has(a.key),
+    );
+    return {
+      at,
+      zone: {
+        key: zone.key,
+        name: zone.name,
+        deviceId: zone.deviceId,
+        station: zone.station,
+        thresholdPct: zone.thresholdPct,
+        targetPct: zone.targetPct,
+        runMinutes: zone.runMinutes,
+        maxMinutesPerDay: zone.maxMinutesPerDay,
+        cooldownMinutes: zone.cooldownMinutes,
+        maxCycleMinutes: zone.maxCycleMinutes,
+        soakMinutes: zone.soakMinutes,
+        sensorAggregation: zone.sensorAggregation,
+        maxReadingAgeMinutes: zone.maxReadingAgeMinutes,
+        criticalLowPct: zone.criticalLowPct,
+        criticalHighPct: zone.criticalHighPct,
+      },
+      ...(decision ? { decision } : {}),
+      sensors: zone.sensorIds.map((id) => {
+        const r = this.#lastReadings.get(id);
+        if (!r) return { id, problem: this.#lastSensorErrors.get(id) ?? 'no reading yet' };
+        const problem = readingProblem(r, at, zone.maxReadingAgeMinutes);
+        return {
+          id,
+          name: r.sensorName,
+          moisturePct: r.moisturePct,
+          ...(r.temperatureC !== undefined ? { temperatureC: r.temperatureC } : {}),
+          ...(r.batteryPct !== undefined ? { batteryPct: r.batteryPct } : {}),
+          at: new Date(r.at),
+          ...(problem ? { problem } : {}),
+        };
+      }),
+      usedLastDayMinutes: Math.round(history.minutesInLastDay(zone.key, at) * 10) / 10,
+      ...(last ? { lastRun: { at: new Date(last.at), minutes: last.minutes } } : {}),
+      ...(cooldownUntil && cooldownUntil.getTime() > at.getTime() ? { cooldownUntil } : {}),
+      ...(sequence ? { sequence: sequenceStatus(sequence) } : {}),
+      ...(wateringNow ? { wateringNow } : {}),
+      alerts,
+      ...(this.#paused ? { paused: copyPause(this.#paused) } : {}),
+    };
+  }
+
+  /**
+   * Turns the water off on these controllers now, and cancels the conductor's watering on them (in
+   * progress or held). It returns them to their normal B-hyve schedule: nothing is switched off, and
+   * automatic watering carries on (pause it to stop it from starting again). A cycle being sent at that
+   * very moment can't be recalled, so the stop is sent again once that send is over. A moment later,
+   * B-hyve is asked whether the water is really off.
+   */
+  async stopWatering(deviceIds: readonly string[], by: string): Promise<StopResult[]> {
+    const reason = `stopped by ${by}`;
+    const results: StopResult[] = [];
+    for (const deviceId of [...new Set(deviceIds)]) {
+      const before = this.#sequencer.held().find((h) => h.seq.deviceId === deviceId);
+      const { sending } = this.#sequencer.cancel(deviceId, reason);
+      const result: StopResult = {
+        deviceId,
+        zoneNames: this.#deps.config.zones.filter((z) => z.deviceId === deviceId).map((z) => z.name),
+        sent: false,
+        ...(before ? { cancelled: sequenceStatus(before) } : {}),
+        check: 'unknown',
+      };
+      await this.#sendStop(result);
+      if (sending) {
+        // The cycle might start after our stop: once its send is over, cancel and stop again.
+        let timer: TimerHandle | undefined;
+        await Promise.race([sending, new Promise<void>((resolve) => (timer = this.#clock.setTimeout(resolve, STOP_RESEND_WAIT_MS)))]);
+        this.#clock.clearTimeout(timer);
+        this.#sequencer.cancel(deviceId, reason);
+        result.resent = true;
+        await this.#sendStop(result);
+      }
+      results.push(result);
+    }
+    await this.#persist();
+    await new Promise<void>((resolve) => this.#clock.setTimeout(resolve, this.#deps.stopCheckDelayMs ?? 5_000));
+    for (const result of results) {
+      try {
+        const device = await this.#deps.bhyve.getDevice(result.deviceId);
+        this.#health.ok('bhyve');
+        result.check = device.status?.watering_status ? 'watering' : 'off';
+      } catch (err) {
+        this.#health.failed('bhyve', err);
+      }
+    }
+    log.warn(`Watering stopped by ${by} on ${results.map((r) => `${r.deviceId} (${r.sent ? r.check : `not sent: ${r.error ?? '?'}`})`).join(', ')}`);
+    this.#audit.record('watering.stopped', {
+      by,
+      devices: results.map((r) => ({
+        device: r.deviceId,
+        zoneNames: r.zoneNames,
+        sent: r.sent,
+        check: r.check,
+        ...(r.error ? { error: r.error } : {}),
+        ...(r.cancelled ? { cancelled: r.cancelled.id } : {}),
+        ...(r.resent ? { resent: true } : {}),
+      })),
+    });
+    return results;
+  }
+
+  async #sendStop(result: StopResult): Promise<void> {
+    try {
+      await this.#deps.bhyve.stopWatering(result.deviceId);
+      this.#health.ok('bhyve-commands');
+      result.sent = true;
+      delete result.error;
+    } catch (err) {
+      this.#health.failed('bhyve-commands', err);
+      result.error = errorMessage(err);
+    }
   }
 
   /**
@@ -496,32 +717,79 @@ export class Monitor {
    * cycles. Sensors are still polled and alerts still sent. Water already running is not turned off.
    * The pause is saved, so it survives a restart.
    */
-  async pause(by: string): Promise<PauseResult> {
+  async pause(by: string, opts: { until?: Date } = {}): Promise<PauseResult> {
+    const until = opts.until;
     if (this.#paused) {
-      return { changed: false, paused: { ...this.#paused }, held: this.#sequencer.held().map(sequenceStatus), wateringNow: this.#sequencer.wateringNow(), sendInProgress: false };
+      const unchanged = { changed: false, held: this.#sequencer.held().map(sequenceStatus), wateringNow: this.#sequencer.wateringNow(), sendInProgress: false };
+      if (!until) return { ...unchanged, paused: copyPause(this.#paused) };
+      // Already paused: give it a (new) end.
+      const previous = this.#paused.until;
+      this.#paused = { ...this.#paused, until: new Date(until) };
+      this.#armPauseEnd();
+      log.info(`Pause now ends at ${until.toISOString()} (changed by ${by})`);
+      this.#audit.record('conductor.pause_changed', { by, until: until.toISOString(), ...(previous ? { previousUntil: previous.toISOString() } : {}) });
+      await this.#persist();
+      return { ...unchanged, updated: true, paused: copyPause(this.#paused) };
     }
-    this.#paused = { since: this.#now(), by };
+    this.#paused = { since: this.#now(), by, ...(until ? { until: new Date(until) } : {}) };
+    this.#lastPauseReminder = this.#now();
+    this.#armPauseEnd();
     const sendInProgress = this.#sequencer.pause();
     const held = this.#sequencer.held().map(sequenceStatus);
     const wateringNow = this.#sequencer.wateringNow();
-    log.warn(`Conductor paused by ${by}: no supplemental watering until resumed`);
+    log.warn(`Conductor paused by ${by}: no supplemental watering until ${until ? until.toISOString() : 'resumed'}`);
     this.#audit.record('conductor.paused', {
       by,
+      ...(until ? { until: until.toISOString() } : {}),
       held: held.map((h) => ({ sequence: h.id, device: h.deviceId, zoneNames: h.zoneNames, nextCycle: h.nextCycle, of: h.cycles })),
       ...(wateringNow.length > 0 ? { wateringNow: wateringNow.map((w) => ({ device: w.deviceId, zoneNames: w.zoneNames, until: w.until.toISOString() })) } : {}),
       ...(sendInProgress ? { sendInProgress } : {}),
     });
     await this.#persist();
-    return { changed: true, paused: { ...this.#paused }, held, wateringNow, sendInProgress };
+    return { changed: true, paused: copyPause(this.#paused), held, wateringNow, sendInProgress };
+  }
+
+  /** Arms (or disarms) the timer that ends a pause with an end time. */
+  #armPauseEnd(): void {
+    this.#clock.clearTimeout(this.#pauseTimer);
+    this.#pauseTimer = undefined;
+    const until = this.#paused?.until;
+    if (!until) return;
+    this.#pauseTimer = this.#clock.setTimeout(
+      () => {
+        this.#pauseTimer = undefined;
+        const paused = this.#paused;
+        if (!paused?.until || this.#now().getTime() < paused.until.getTime()) return;
+        // Nobody is asked: held watering is an old plan, so it's discarded; the zones are re-checked anyway.
+        this.resume('the end of the pause', 'discard', { auto: true }).catch((err: unknown) => log.error('Could not end the pause', err));
+      },
+      Math.max(0, until.getTime() - this.#now().getTime()),
+    );
+  }
+
+  /** While paused with no end, a reminder once a day (a forgotten pause means no supplemental watering). */
+  #remindIfStillPaused(now: Date): void {
+    const paused = this.#paused;
+    if (!paused || paused.until) return;
+    const last = this.#lastPauseReminder ?? paused.since;
+    if (now.getTime() - last.getTime() < PAUSE_REMINDER_MS || now.getTime() - paused.since.getTime() < PAUSE_REMINDER_MS) return;
+    this.#lastPauseReminder = now;
+    this.#audit.record('conductor.pause_reminder', {
+      since: paused.since.toISOString(),
+      by: paused.by,
+      pausedHours: Math.round((now.getTime() - paused.since.getTime()) / 3_600_000),
+    });
   }
 
   /**
    * Ends a pause. Held sequences are continued (each only if it's not too old, as after a restart) or
    * discarded; either way the zones are re-checked straight away.
    */
-  async resume(by: string, held: HeldSequenceAction): Promise<ResumeResult> {
+  async resume(by: string, held: HeldSequenceAction, opts: { auto?: boolean } = {}): Promise<ResumeResult> {
     const paused = this.#paused;
     if (!paused) return { changed: false, pausedMinutes: 0, continued: [], discarded: [] };
+    this.#clock.clearTimeout(this.#pauseTimer);
+    this.#pauseTimer = undefined;
     const before = new Map(this.#sequencer.held().map((h) => [h.seq.id, sequenceStatus(h)]));
     const status = (seq: PendingSequence): SequenceStatus => before.get(seq.id) ?? sequenceStatus({ seq, dueAt: seq.dueAt, stale: false });
     let continued: SequenceStatus[] = [];
@@ -539,6 +807,7 @@ export class Monitor {
     log.info(`Conductor resumed by ${by} after ${pausedMinutes} min`);
     this.#audit.record('conductor.resumed', {
       by,
+      ...(opts.auto ? { auto: true } : {}),
       pausedBy: paused.by,
       pausedMinutes,
       held,
@@ -560,6 +829,7 @@ export class Monitor {
     if (this.#running) return;
     this.#running = true;
     this.#startedAt = this.#now();
+    this.#armPauseEnd();
     log.info(
       `Monitoring ${this.#deps.config.zones.length} zone(s) every ${this.#deps.config.pollIntervalMinutes} min` +
         (this.#deps.config.dryRun ? ' (dry run: no commands will be sent)' : ''),
@@ -574,18 +844,22 @@ export class Monitor {
     let watchdog: TimerHandle | undefined;
     const deadline = new Promise<never>((_, reject) => {
       watchdog = this.#clock.setTimeout(
-        () => reject(new Error(`poll did not finish within ${POLL_DEADLINE_MS / MINUTE_MS} min (something is hanging); moving on`)),
+        () => reject(new PollDeadlineError(`poll did not finish within ${POLL_DEADLINE_MS / MINUTE_MS} min (something is hanging); moving on`)),
         POLL_DEADLINE_MS,
       );
     });
     const pollStartedAt = this.#now();
+    this.#remindIfStillPaused(pollStartedAt);
     this.#pollStartedAt = pollStartedAt;
     this.#nextPollAt = undefined;
     this.#inFlight = Promise.race([this.runCycle(), deadline])
       .then(() => {
+        this.#polls.ok++;
         this.#lastPoll = { startedAt: pollStartedAt, finishedAt: this.#now(), ok: true };
       })
       .catch((err: unknown) => {
+        if (err instanceof PollDeadlineError) this.#polls.hung++;
+        else this.#polls.failed++;
         log.error('Monitoring cycle failed; will retry next poll', err);
         this.#audit.record('poll.failed', { error: errorMessage(err) });
         this.#lastPoll = { startedAt: pollStartedAt, finishedAt: this.#now(), ok: false, error: errorMessage(err) };
@@ -608,11 +882,15 @@ export class Monitor {
     this.#clock.clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#nextPollAt = undefined;
+    this.#clock.clearTimeout(this.#pauseTimer);
+    this.#pauseTimer = undefined;
     this.#sequencer.stop();
     await this.#inFlight;
     await this.#saveQueue;
   }
 }
+
+const copyPause = (p: PauseInfo): PauseInfo => ({ since: new Date(p.since), by: p.by, ...(p.until ? { until: new Date(p.until) } : {}) });
 
 const sequenceStatus = ({ seq, dueAt, stale }: HeldSequence): SequenceStatus => ({
   id: seq.id,

@@ -6,6 +6,9 @@
  *    step (the bot refuses), isn't locked by wrong passphrases, and gives way to anyone else's command;
  *  - `mutable`: changes something (/pause, /resume, /config). Only its last step, after the passphrase,
  *    may change anything; every earlier step only reads.
+ *  - `safety`: only ever makes things safer, i.e. less water (/stop). Its last step acts right after a
+ *    confirmation, with no passphrase (it must be quick in an emergency), and works even while changes
+ *    are locked. It must be given nothing that could start watering.
  *
  * Conversations (interactive and mutable) are steps: the command says what to ask and what an answer
  * leads to; the bot (bot.ts) asks, checks answers, and handles every edge case (cancel, unexpected
@@ -44,7 +47,12 @@ export type Step =
    */
   | { kind: 'input'; text: string; hint: string; placeholder?: string; read: (answer: string) => InputResult | Promise<InputResult> }
   /** The last step of a mutable command: `run` happens only after the right passphrase. */
-  | { kind: 'passphrase'; text: string; run: () => Promise<RunResult> };
+  | { kind: 'passphrase'; text: string; run: () => Promise<RunResult> }
+  /**
+   * The last step of a safety command: as soon as it is reached (after a confirmation), `text` is said
+   * ("Stopping…": the action may take a moment), then `run` happens.
+   */
+  | { kind: 'act'; text: string; run: () => Promise<RunResult> };
 
 export const done = (text: string): Step => ({ kind: 'done', text });
 
@@ -71,6 +79,9 @@ export const ask = (q: { text: string; hint: string; choices: readonly Choice[] 
 /** "… Reply yes or cancel." */
 export const confirm = (q: { text: string; hint: string; label?: string; then: () => Step | Promise<Step> }): Step =>
   ask({ text: q.text, hint: q.hint, choices: [{ words: YES_WORDS, label: q.label ?? 'yes', next: q.then }] });
+
+/** The last step of a safety command: say what's happening, and do it now. */
+export const act = (text: string, run: () => Promise<RunResult>): Step => ({ kind: 'act', text, run });
 
 /** The last step of a change: "🔐 Send the passphrase to <action>, or cancel." */
 export const passphraseStep = (q: { intro?: string; action: string; run: () => Promise<RunResult> }): Step => ({
@@ -129,7 +140,12 @@ export interface MutableCommand extends ConversationBase {
   kind: 'mutable';
 }
 
-export type ConversationCommand = InteractiveCommand | MutableCommand;
+/** Only ever reduces watering: a conversation ending with a confirmation, then an `act` step. */
+export interface SafetyCommand extends ConversationBase {
+  kind: 'safety';
+}
+
+export type ConversationCommand = InteractiveCommand | MutableCommand | SafetyCommand;
 export type BotCommand = QueryCommand | ConversationCommand;
 
 export const COMMAND_NAME = /^[a-z0-9_]{1,32}$/;

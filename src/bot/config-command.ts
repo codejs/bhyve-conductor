@@ -2,6 +2,7 @@ import type { ConfigCheck, ConfigEditor, RuleChange, RuleChanges, ZoneSettings }
 import { zoneRuleProblem, type EditableZoneRule } from '../conductor/config.ts';
 import { ask, done, passphraseStep, via, type Actor, type InputResult, type MutableCommand, type Step } from './conversation.ts';
 import { duration, fitLines, safe } from './format.ts';
+import { pickZone } from './zones.ts';
 
 /**
  * /config: change a zone's watering settings. Shows them, goes through them one at a time (a new value,
@@ -83,24 +84,7 @@ export const buildConfigCommand = ({ editor }: ConfigCommandDeps): MutableComman
       'Saved to conductor.json (the old one is kept as conductor.json.bak); used from the next poll.',
     ],
   },
-  begin: (actor) => {
-    const zones = editor.zones();
-    if (zones.length === 0) return done('No zones are configured.');
-    const only = zones[0];
-    if (zones.length === 1 && only) return walk(editor, actor, only);
-    return {
-      kind: 'input',
-      text: ['⚙️ <b>Which zone?</b>', ...zones.map((z, i) => `${i + 1}. ${safe(z.name)}`), '', 'Reply its number, or <b>cancel</b>.'].join('\n'),
-      hint: `Reply a number from 1 to ${zones.length}, or cancel.`,
-      placeholder: 'zone number',
-      read: (answer) => {
-        const text = answer.trim().toLowerCase();
-        const byNumber = /^\d{1,3}$/.test(text) ? zones[Number(text) - 1] : undefined;
-        const zone = byNumber ?? zones.find((z) => z.name.toLowerCase() === text);
-        return zone ? { next: walk(editor, actor, zone) } : { invalid: 'That is not one of the zones.' };
-      },
-    };
-  },
+  begin: (actor) => pickZone(editor.zones(), { title: '⚙️ <b>Which zone?</b>', then: (zone) => walk(editor, actor, zone) }),
 });
 
 /** Goes through the settings of one zone, then to the summary. */

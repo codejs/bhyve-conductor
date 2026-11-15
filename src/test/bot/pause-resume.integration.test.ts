@@ -3,7 +3,7 @@ import { MemoryAuditLog } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot } from '../../bot/bot.ts';
 import { zonesBySensor } from '../../bot/commands.ts';
-import { buildBotCommands } from '../../bot/registry.ts';
+import { buildBotCommands, conductorCommandDeps } from '../../bot/registry.ts';
 import { VirtualClock } from '../../clock.ts';
 import type { ConductorConfig, ZoneConfig } from '../../conductor/config.ts';
 import { ConfigEditor } from '../../conductor/config-editor.ts';
@@ -13,6 +13,7 @@ import type { ConductorState } from '../../conductor/state.ts';
 import { log } from '../../log.ts';
 import type { MoistureReading } from '../../sensors/types.ts';
 import { bhyveDevice, NOW, reading, zone } from '../utils/conductor.ts';
+import { serviceInfo } from '../utils/bot.ts';
 import { fakeBhyve } from '../utils/fake-bhyve.ts';
 import { fakeBotApi, OWNER, updates } from '../utils/fake-telegram.ts';
 
@@ -70,20 +71,21 @@ const setup = (saved?: ConductorState, clock = new VirtualClock(NOW)) => {
   const bot = new CommandBot({
     api: api.bot,
     policy: POLICY,
-    // Assembled exactly as index.ts does.
-    commands: buildBotCommands({
-      bhyve: { getDevices: () => fake.bhyve.getDevices() },
-      sensors: source,
-      zonesBySensor: zonesBySensor([FRONT]),
-      status: () => monitor.status(),
-      timeZone: 'UTC',
-      now: () => clock.now(),
-      readAudit: async () => ({ events: audit.events, skipped: 0, truncated: false }),
-      changes: {
-        control: { status: () => monitor.status(), pause: (by) => monitor.pause(by), resume: (by, held) => monitor.resume(by, held) },
+    // Wired exactly as index.ts does.
+    commands: buildBotCommands(
+      conductorCommandDeps({
+        monitor,
+        config: monitorConfig,
+        bhyve: fake.bhyve,
+        sensors: source,
+        zonesBySensor: zonesBySensor([FRONT]),
+        readAudit: async () => ({ events: audit.events, skipped: 0, truncated: false }),
+        service: () => serviceInfo(),
+        timeZone: 'UTC',
+        now: () => clock.now(),
         editor: new ConfigEditor({ path: '/nonexistent/conductor.json', config: monitorConfig }),
-      },
-    }),
+      }),
+    ),
     passphrase: PASS,
     reply: (html) => replies.push(html),
     audit,
@@ -157,7 +159,7 @@ describe('pause and resume through Telegram (integration)', () => {
     await t.clock.advanceBy(CYCLE_GAP + 5 * MIN); // cycle 2 would have been due
     expect(t.waterings()).toBe(1);
 
-    await t.say('/status');
+    await t.say('/health');
     expect(t.replies.at(-1)).toContain('⏸️ <b>Paused</b> since Jul 1, 12:00 by @owner via Telegram');
     expect(t.replies.at(-1)).toContain('<b>Watering on hold</b>\n⏸️ Front lawn: cycle 2/3 due since Jul 1, 12:41');
 
@@ -279,5 +281,70 @@ describe('pause and resume through Telegram (integration)', () => {
     await t.clock.advanceBy(0);
     expect(t.waterings()).toBe(1);
     expect(t.monitor.status().sequences.map((q) => q.id)).not.toContain(heldId);
+  });
+
+  it('/stop turns the water off in the middle of a sequence, and no later cycle starts', async () => {
+    const t = track(setup());
+    await t.start();
+    expect(t.waterings()).toBe(1);
+
+    await t.say('/stop');
+    expect(t.lastSaid()).toContain("🛑 <b>Stop the water now?</b>\n• Timer dev1 (Front lawn): not watering · the conductor's cycle 1/3 on until Jul 1, 12:11");
+    expect(t.fake.bhyve.stopWatering).not.toHaveBeenCalled();
+    await t.say('yes');
+    await t.clock.advanceBy(5_000); // the moment before B-hyve is asked whether it's off
+
+    expect(t.fake.bhyve.stopWatering).toHaveBeenCalledWith('dev1');
+    expect(t.api.texts()).toContain('🛑 Stopping the water…');
+    expect(t.lastSaid()).toMatch(/^🛑 <b>Stop sent<\/b>\n• Timer dev1 \(Front lawn\): ✅ off · cancelled the conductor's watering \(cycle 2\/3 was next\)/);
+    await t.clock.advanceBy(3 * CYCLE_GAP);
+    expect(t.waterings()).toBe(1);
+    expect(t.audit.ofType('watering.stopped')).toHaveLength(1);
+  });
+
+  it('/stop works without the passphrase, even while changes are locked', async () => {
+    const t = track(setup());
+    await t.start();
+    for (let i = 0; i < 3; i++) await t.say('/pause', 'yes', `wrong passphrase ${i}`);
+    expect(t.lastSaid()).toContain('🔒 Changes are now locked');
+
+    await t.say('/stop', 'yes');
+    await t.clock.advanceBy(5_000);
+
+    expect(t.fake.bhyve.stopWatering).toHaveBeenCalled();
+  });
+
+  it('/pause 2h pauses, and automatic watering comes back on its own', async () => {
+    const t = track(setup());
+    t.setMoisture(50);
+    await t.start();
+
+    await t.say('/pause 2h');
+    expect(t.lastSaid()).toContain('Pause automatic watering for 2 h (until Jul 1, 14:00)?');
+    await t.say(PASS);
+    expect(t.monitor.paused).toMatchObject({ until: new Date(NOW.getTime() + 2 * 60 * MIN) });
+    t.setMoisture(10);
+    await t.clock.advanceBy(119 * MIN);
+    expect(t.waterings()).toBe(0);
+
+    await t.clock.advanceBy(MIN);
+
+    expect(t.monitor.paused).toBeUndefined();
+    expect(t.audit.ofType('conductor.resumed')).toEqual([expect.objectContaining({ auto: true })]);
+    expect(t.waterings()).toBe(1); // re-checked straight away
+  });
+
+  it('/zone and /health show what is going on', async () => {
+    const t = track(setup());
+    await t.start();
+
+    await t.say('/zone');
+    expect(t.lastSaid()).toMatch(/^🌱 <b>Front lawn<\/b> · controller dev1, station 1\n💦 <b>dry<\/b>/);
+    expect(t.lastSaid()).toContain('• 💧 Water on until Jul 1, 12:11 (cycle 1/3) · /stop turns it off');
+
+    await t.say('/health');
+    expect(t.replies.at(-1)).toMatch(/^🩺 <b>Health<\/b>: /);
+    expect(t.replies.at(-1)).toContain('1. 💦 Front lawn: dry, soil 10%');
+    expect(t.replies.at(-1)).toContain('<b>Water on now</b> (/stop turns it off)');
   });
 });

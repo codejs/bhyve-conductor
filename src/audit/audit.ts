@@ -66,6 +66,12 @@ export type AuditType =
   | 'conductor.resumed'
   /** The conductor started while paused (the pause survives restarts). */
   | 'conductor.still_paused'
+  /** Paused with an end time, its end was changed (e.g. /pause 4h while paused). */
+  | 'conductor.pause_changed'
+  /** Still paused after a day or more, with no end set (a forgotten pause means no supplemental watering). */
+  | 'conductor.pause_reminder'
+  /** The water was turned off on some controllers (e.g. /stop in Telegram), and the conductor's watering there cancelled. */
+  | 'watering.stopped'
   /** A zone's watering settings were changed while running (e.g. /config in Telegram); saved to conductor.json. */
   | 'config.changed'
   /** A zone's decision changed (e.g. moist → dry → waiting for rain). Only changes are recorded. */

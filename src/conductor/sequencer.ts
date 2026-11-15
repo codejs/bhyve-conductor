@@ -28,6 +28,8 @@ import type { PendingSequence } from './state.ts';
  *  - pause() holds every sequence: no further wave is sent (checked again right before each send) until
  *    continueHeld() or discardHeld(). A held sequence continues under the same rule as after a restart:
  *    only if its next wave was due within `resumeWindowMinutes`; an older plan is abandoned instead.
+ *  - cancel() ends a device's sequence at once (e.g. the owner stopped the water): nothing more is sent
+ *    for it, even by an attempt already under way (checked again after every wait).
  */
 
 export type SequencerBhyve = Pick<BhyveClient, 'startWatering' | 'getDevice' | 'onEvent'>;
@@ -86,11 +88,11 @@ export class Sequencer {
   readonly #clock: Clock;
   #drainWaiters: (() => void)[] = [];
   #stopped = false;
-  /** "Water off" timers for sequences whose last cycle is still running. */
-  readonly #finishTimers = new Set<TimerHandle>();
+  /** "Water off" timers for sequences whose last cycle is still running, with their device. */
+  readonly #finishTimers = new Map<TimerHandle, string>();
   #paused = false;
-  /** Attempts past the last pause check, i.e. sending or confirming a wave (can't be recalled). */
-  #sending = 0;
+  /** Attempts past the last check, i.e. sending or confirming a wave (can't be recalled), per device. */
+  readonly #sending = new Map<string, Promise<void>>();
   /** The last wave delivered per device, to tell whether water is on right now. */
   readonly #lastWave = new Map<string, RunningWave>();
 
@@ -178,7 +180,25 @@ export class Sequencer {
     }
     // Nothing progresses while paused, so nobody should wait for it (e.g. --once).
     for (const resolve of this.#drainWaiters.splice(0)) resolve();
-    return this.#sending > 0;
+    return this.#sending.size > 0;
+  }
+
+  /**
+   * Ends the device's sequence now, running or held: nothing more is sent for it, and there will be no
+   * "water off" report (whoever cancels reports it). `sending` is set if a wave is being sent at this very
+   * moment: it can't be recalled, so it settles once that attempt is over (e.g. to stop the water again).
+   */
+  cancel(deviceId: string, reason: string): { cancelled?: PendingSequence; sending?: Promise<void> } {
+    const entry = this.#active.get(deviceId);
+    if (entry) this.#abandon(entry.seq, reason);
+    this.#lastWave.delete(deviceId);
+    for (const [timer, device] of this.#finishTimers) {
+      if (device !== deviceId) continue;
+      this.#clock.clearTimeout(timer);
+      this.#finishTimers.delete(timer);
+    }
+    const sending = this.#sending.get(deviceId);
+    return { ...(entry ? { cancelled: entry.seq } : {}), ...(sending ? { sending } : {}) };
   }
 
   /** Takes sequences saved by a previous run without sending anything (startup while paused). */
@@ -295,7 +315,7 @@ export class Sequencer {
   stop(): void {
     this.#stopped = true;
     for (const { timer } of this.#active.values()) this.#clock.clearTimeout(timer);
-    for (const timer of this.#finishTimers) this.#clock.clearTimeout(timer);
+    for (const timer of this.#finishTimers.keys()) this.#clock.clearTimeout(timer);
     this.#finishTimers.clear();
     if (this.#active.size > 0) {
       log.warn(
@@ -313,6 +333,7 @@ export class Sequencer {
     const index = seq.nextWave;
     const cycle = { sequence: seq.id, device: seq.deviceId, zoneNames: seq.zoneNames, cycle: index + 1, of: seq.waves.length };
     if (this.#paused) return 'held';
+    if (!this.#isCurrent(seq)) return 'abandoned';
 
     if (precheck) {
       const check = await this.#precheck(seq.deviceId);
@@ -326,15 +347,26 @@ export class Sequencer {
         return this.#retryOrAbandon(seq, check.reason);
       }
     }
-    // Paused while the device was being checked: nothing has been sent, so nothing is.
+    // Paused or cancelled while the device was being checked: nothing has been sent, so nothing is.
     if (this.#paused) return 'held';
+    if (!this.#isCurrent(seq)) return 'abandoned';
 
-    this.#sending++;
+    const attempt = this.#send(seq, cycle);
+    const settled = attempt.then(
+      () => {},
+      () => {},
+    );
+    this.#sending.set(seq.deviceId, settled);
     try {
-      return await this.#send(seq, cycle);
+      return await attempt;
     } finally {
-      this.#sending--;
+      if (this.#sending.get(seq.deviceId) === settled) this.#sending.delete(seq.deviceId);
     }
+  }
+
+  /** Is this still the device's sequence (not cancelled or replaced meanwhile)? */
+  #isCurrent(seq: PendingSequence): boolean {
+    return this.#active.get(seq.deviceId)?.seq === seq;
   }
 
   async #send(seq: PendingSequence, cycle: { sequence: string; device: string; zoneNames?: string[] | undefined; cycle: number; of: number }): Promise<StartResult> {
@@ -513,7 +545,8 @@ export class Sequencer {
   #schedule(seq: PendingSequence, delayMs: number): void {
     if (this.#stopped || this.#paused) return;
     const entry = this.#active.get(seq.deviceId);
-    if (!entry) return;
+    // Only the device's current sequence: one that was cancelled (and maybe replaced) schedules nothing.
+    if (entry?.seq !== seq) return;
     this.#clock.clearTimeout(entry.timer);
     entry.timer = this.#clock.setTimeout(() => {
       this.#attempt(seq, true).catch((err: unknown) => log.error(`Watering sequence ${seq.id} failed unexpectedly`, err));
@@ -550,7 +583,7 @@ export class Sequencer {
         startedAt: seq.createdAt.toISOString(),
       });
     }, afterMs);
-    this.#finishTimers.add(timer);
+    this.#finishTimers.set(timer, seq.deviceId);
   }
 
   #complete(seq: PendingSequence): void {

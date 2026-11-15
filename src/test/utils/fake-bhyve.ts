@@ -25,6 +25,7 @@ export const fakeBhyve = (initial: BhyveDevice[]) => {
     startWatering: vi.fn(async (deviceId: string, _runs: StationRun[]) => {
       if (acknowledge) emit({ event: 'watering_in_progress_notification', device_id: deviceId });
     }),
+    stopWatering: vi.fn(async (_deviceId: string) => {}),
     onEvent: vi.fn((listener: (e: BhyveEvent) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

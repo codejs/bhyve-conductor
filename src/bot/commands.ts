@@ -2,7 +2,7 @@ import type { BhyveClient } from '../bhyve/client.ts';
 import type { ConductorStatus } from '../conductor/monitor.ts';
 import type { MoistureSource } from '../sensors/types.ts';
 import type { QueryCommand } from './conversation.ts';
-import { formatDevices, formatReadings, formatStatus } from './format.ts';
+import { formatDevices, formatHealth, formatReadings, type ServiceInfo } from './format.ts';
 
 /**
  * The read-only queries the Telegram bot answers: nothing here can start or stop watering or change
@@ -21,6 +21,8 @@ export interface CommandDeps {
   zonesBySensor: ReadonlyMap<string, readonly string[]>;
   /** The conductor's state, without network calls (Monitor.status). */
   status: () => ConductorStatus;
+  /** About the service itself (version, memory, files, notifications...), for /health. */
+  service: () => ServiceInfo;
   /** For times in replies (default: this machine's). */
   timeZone?: string | undefined;
   now?: () => Date;
@@ -31,20 +33,21 @@ export const buildCommands = (deps: CommandDeps): QueryCommand[] => {
   return [
     {
       kind: 'query',
-      name: 'status',
-      description: 'What the conductor is doing: polls, zones, watering, connections, alerts',
+      name: 'health',
+      description: 'Is everything all right? Watering, zones, connections, alerts, and the service itself',
       help: {
-        usage: [{ call: '/status', does: 'what the conductor is doing right now' }],
+        usage: [{ call: '/health', does: 'everything at a glance, with what needs a look first' }],
         details: [
-          'Whether it is running or paused, and the last and next poll.',
-          "Each zone's latest decision and soil moisture.",
-          'Watering in progress or on hold, and water that is on.',
-          'Services that cannot be reached, and open alerts (batteries, moisture, controllers).',
+          'First: all good, or what needs a look (services down, failed polls, open alerts, lockouts...).',
+          'Running or paused (and until when), the last and next poll.',
+          "Each zone's latest decision and soil moisture, numbered for /zone.",
+          'Watering in progress or on hold, water that is on, connections and open alerts.',
+          'The service: version, uptime, memory, polls, file sizes, notifications.',
           'Nothing is fetched from the cloud, so it is always quick.',
         ],
       },
       cooldownSeconds: 0,
-      run: async () => formatStatus(deps.status(), deps.timeZone),
+      run: async () => formatHealth(deps.status(), deps.service(), deps.timeZone),
     },
     {
       kind: 'query',

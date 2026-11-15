@@ -282,6 +282,21 @@ export class Notifier implements AuditSink {
       case 'state.save_failed':
         return { severity: 'critical', text: `💾 <b>Can’t save state</b>: ${str(e.error)}\nCooldowns and pending cycles won’t survive a restart.` };
 
+      case 'conductor.pause_reminder': {
+        const hours = typeof e.pausedHours === 'number' ? e.pausedHours : 0;
+        const days = Math.floor(hours / 24);
+        return {
+          severity: 'warning',
+          text:
+            `⏸️ <b>Still paused</b> after ${days >= 1 ? `${days} day(s)` : `${hours} h`} (since ${at(e.since)} by ${str(e.by)}): ` +
+            'no supplemental watering. Send /resume to resume.',
+        };
+      }
+      case 'conductor.resumed':
+        // Someone who resumes in the chat gets the answer there; a pause that ends on its own is news.
+        return e.auto
+          ? { severity: 'info', text: `▶️ <b>The pause is over</b> (set by ${str(e.pausedBy)}): automatic watering is on again.` }
+          : undefined;
       case 'conductor.still_paused':
         // Worded as what happened at restart: queued notifications can arrive after a quick /resume.
         return {

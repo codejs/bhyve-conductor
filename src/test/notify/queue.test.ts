@@ -23,6 +23,20 @@ describe('DeliveryQueue', () => {
     vi.spyOn(log, 'error').mockImplementation(() => {});
   });
 
+  it('counts what was sent, dropped and is waiting (a combined send counts each message)', async () => {
+    const t = setup({ maxQueued: 10 });
+    t.send.mockImplementationOnce(async () => {}); // the first goes out alone...
+    for (const m of ['a', 'b', 'c']) t.queue.enqueue(m); // ...the other two together
+    expect(t.queue.stats()).toEqual({ delivered: 0, failed: 0, waiting: 2 });
+    await t.clock.advanceBy(10_000);
+    expect(t.queue.stats()).toEqual({ delivered: 3, failed: 0, waiting: 0 });
+
+    t.send.mockRejectedValue(new TelegramPermanentError('Bad Request: chat not found'));
+    t.queue.enqueue('d');
+    await t.clock.advanceBy(10_000);
+    expect(t.queue.stats()).toEqual({ delivered: 3, failed: 1, waiting: 0 });
+  });
+
   it('delivers in order, at most one message per interval', async () => {
     const t = setup();
     t.queue.enqueue('a');

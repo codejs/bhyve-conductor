@@ -1,38 +1,31 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { buildBotCommands, type BotCommandsDeps } from '../../bot/registry.ts';
-import { NOW } from '../utils/conductor.ts';
+import { fakeBotDeps } from '../utils/bot.ts';
 
-const deps = (withChanges: boolean): BotCommandsDeps => ({
-  bhyve: { getDevices: vi.fn(async () => []) },
-  sensors: { id: 'x', read: vi.fn(async () => []) },
-  zonesBySensor: new Map(),
-  status: vi.fn(),
-  timeZone: 'UTC',
-  now: () => NOW,
-  readAudit: vi.fn(async () => ({ events: [], skipped: 0, truncated: false })),
-  ...(withChanges
-    ? { changes: { control: { status: vi.fn(), pause: vi.fn(), resume: vi.fn() }, editor: { zones: () => [], preview: vi.fn(), apply: vi.fn() } } }
-    : {}),
-});
+const deps = (withChanges: boolean): BotCommandsDeps => fakeBotDeps({ changes: withChanges });
 
 describe('buildBotCommands', () => {
-  it('offers only read-only commands without changes (no passphrase)', () => {
+  it('offers read-only commands and /stop without changes (no passphrase)', () => {
     const commands = buildBotCommands(deps(false));
     expect(commands.map((c) => [c.name, c.kind])).toEqual([
-      ['status', 'query'],
+      ['health', 'query'],
+      ['zone', 'interactive'],
       ['sensors_read', 'query'],
       ['bhyve_devices', 'query'],
       ['audit', 'interactive'],
+      ['stop', 'safety'],
     ]);
   });
 
   it('adds the commands that change something when given what they work on', () => {
     const commands = buildBotCommands(deps(true));
     expect(commands.map((c) => [c.name, c.kind])).toEqual([
-      ['status', 'query'],
+      ['health', 'query'],
+      ['zone', 'interactive'],
       ['sensors_read', 'query'],
       ['bhyve_devices', 'query'],
       ['audit', 'interactive'],
+      ['stop', 'safety'],
       ['pause', 'mutable'],
       ['resume', 'mutable'],
       ['config', 'mutable'],

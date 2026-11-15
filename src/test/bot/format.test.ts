@@ -5,12 +5,19 @@ import {
   fitLines,
   formatDevices,
   formatReadings,
-  formatStatus,
+  formatHealth,
+  formatZone,
+  alertLabel,
+  isDuration,
+  parseDuration,
+  size,
   MAX_REPLY_CHARS,
   safe,
   shortTime,
 } from '../../bot/format.ts';
-import type { ConductorStatus } from '../../conductor/monitor.ts';
+import type { ServiceName } from '../../audit/health.ts';
+import type { ConductorStatus, ZoneDetail } from '../../conductor/monitor.ts';
+import { conductorStatus, serviceInfo } from '../utils/bot.ts';
 import { bhyveDevice, minutesAgo, NOW, reading } from '../utils/conductor.ts';
 
 const MIN = 60_000;
@@ -187,53 +194,54 @@ describe('formatReadings', () => {
   });
 });
 
-describe('formatStatus', () => {
-  const base = (overrides: Partial<ConductorStatus> = {}): ConductorStatus => ({
-    at: NOW,
-    running: true,
-    dryRun: false,
-    pollIntervalMinutes: 15,
-    startedAt: minutesAgo(150),
-    polling: false,
-    lastPoll: { startedAt: minutesAgo(4), finishedAt: minutesAgo(3), ok: true },
-    nextPollAt: new Date(NOW.getTime() + 12 * MIN),
-    zones: [
-      { key: 'dev1:1', name: 'Front lawn', decision: { at: minutesAgo(3), action: 'none', reason: 'moist', detail: '', moisturePct: 35.2 } },
-      { key: 'dev1:2', name: 'Back lawn', decision: { at: minutesAgo(3), action: 'water', reason: 'dry', detail: '', moisturePct: 22, runMinutes: 12 } },
-      { key: 'dev1:3', name: 'Beds', decision: { at: minutesAgo(3), action: 'skip', reason: 'no-data', detail: '' } },
-      { key: 'dev1:4', name: 'Side', decision: { at: minutesAgo(3), action: 'skip', reason: 'something-new', detail: '' } },
-      { key: 'dev2:1', name: 'New zone' },
-    ],
-    sequences: [],
-    wateringNow: [],
-    outages: [],
-    alerts: [],
-    ...overrides,
-  });
+describe('formatHealth', () => {
+  const base = (overrides: Partial<ConductorStatus> = {}): ConductorStatus =>
+    conductorStatus({
+      startedAt: minutesAgo(150),
+      lastPoll: { startedAt: minutesAgo(4), finishedAt: minutesAgo(3), ok: true },
+      nextPollAt: new Date(NOW.getTime() + 12 * MIN),
+      zones: [
+        { key: 'dev1:1', name: 'Front lawn', decision: { at: minutesAgo(3), action: 'none', reason: 'moist', detail: '', moisturePct: 35.2 } },
+        { key: 'dev1:2', name: 'Back lawn', decision: { at: minutesAgo(3), action: 'water', reason: 'dry', detail: '', moisturePct: 22, runMinutes: 12 } },
+        { key: 'dev1:3', name: 'Beds', decision: { at: minutesAgo(3), action: 'skip', reason: 'no-data', detail: '' } },
+        { key: 'dev1:4', name: 'Side', decision: { at: minutesAgo(3), action: 'skip', reason: 'something-new', detail: '' } },
+        { key: 'dev2:1', name: 'New zone' },
+      ],
+      polls: { ok: 288, failed: 2, hung: 0 },
+      ...overrides,
+    });
+  const health = (s: ConductorStatus, service = serviceInfo()) => formatHealth(s, service, 'UTC');
 
-  it('summarises a healthy conductor', () => {
-    expect(formatStatus(base(), 'UTC')).toBe(
+  it('summarises a healthy conductor: verdict first, then everything /status used to show, then the service', () => {
+    expect(health(base())).toBe(
       [
-        '🌱 <b>Lawn conductor status</b>',
+        '🩺 <b>Health</b>: ✅ all good',
+        '',
         '▶️ Running since Jul 1, 09:30 (2.5 h), polling every 15 min',
         '✅ Last poll Jul 1, 11:57 (3 min ago)',
         '⏭️ Next poll Jul 1, 12:12',
         '',
-        '<b>Zones</b>',
-        '🟢 Front lawn: moist, soil 35.2% <i>(3 min ago)</i>',
-        '💦 Back lawn: dry, soil 22%, 12 min <i>(3 min ago)</i>',
-        '📵 Beds: no-data <i>(3 min ago)</i>',
-        '• Side: something-new <i>(3 min ago)</i>',
-        '• New zone: no decision yet',
+        '<b>Zones</b> (details: /zone <i>number</i>)',
+        '1. 🟢 Front lawn: moist, soil 35.2% <i>(3 min ago)</i>',
+        '2. 💦 Back lawn: dry, soil 22%, 12 min <i>(3 min ago)</i>',
+        '3. 📵 Beds: no-data <i>(3 min ago)</i>',
+        '4. • Side: something-new <i>(3 min ago)</i>',
+        '5. New zone: no decision yet',
         '',
         '<b>Connections</b>',
         '🟢 All services reachable',
+        '',
+        '<b>Service</b>',
+        'v1.0.0 · Node v22.21.0 · up 3 h · memory 80 MB',
+        'Polls since start: 288 ok · 2 failed · 0 stuck',
+        'Files: audit trail 1.2 MB · state 2 KB · settings 900 B',
+        'Notifications: 12 sent · 0 failed · 0 waiting',
       ].join('\n'),
     );
   });
 
-  it('shows watering in progress, outages and open alerts', () => {
-    const html = formatStatus(
+  it('shows watering in progress, outages and open alerts (in words), and lists what needs a look first', () => {
+    const html = health(
       base({
         polling: true,
         lastPoll: { startedAt: minutesAgo(20), finishedAt: minutesAgo(19), ok: false, error: 'Tuya GET /v1.0/token timed out after 20s' },
@@ -244,20 +252,43 @@ describe('formatStatus', () => {
         outages: [{ service: 'tuya', since: minutesAgo(45), failures: 3, lastError: 'timed out' }],
         alerts: [{ key: 'battery:sensor:s1', state: 'low', since: minutesAgo(600) }],
       }),
-      'UTC',
     );
+    expect(html.split('\n').slice(0, 4)).toEqual([
+      '🩺 <b>Health</b>: ⚠️ 3 thing(s) to look at',
+      '• tuya unreachable since Jul 1, 11:15',
+      '• the last poll failed',
+      '• 1 open alert(s)',
+    ]);
     expect(html).toContain('🔄 Polling right now');
     expect(html).toContain('❌ Last poll failed Jul 1, 11:41 (19 min ago): Tuya GET /v1.0/token timed out after 20s');
     expect(html).toContain('<b>Watering in progress</b>\n💧 Back lawn: cycle 2/3 due Jul 1, 12:25\n💧 dev2: cycle 1/1 due now, 2 failed attempt(s)');
     expect(html).toContain('🔴 tuya unreachable since Jul 1, 11:15 (3 failure(s)): timed out');
-    expect(html).toContain('<b>Open alerts</b> (1)\n⚠️ battery:sensor:s1: low since Jul 1, 02:00');
+    expect(html).toContain('<b>Open alerts</b> (1)\n🪫 low battery: sensor s1 since Jul 1, 02:00');
     expect(html).not.toContain('All services reachable');
   });
 
-  it('shows a pause, the watering on hold (and what is too old to continue), and water that is on', () => {
-    const html = formatStatus(
+  it.each([
+    ['no poll for a long time', { lastPoll: { startedAt: minutesAgo(50), finishedAt: minutesAgo(40), ok: true } }, {}, '• no poll for 40 min'],
+    ['monitoring stopped', { running: false }, {}, '• monitoring is not running'],
+    ['notifications lost', {}, { notifications: { delivered: 3, failed: 2, waiting: 0 } }, '• 2 notification(s) could not be sent'],
+    ['changes locked', {}, { commandsLockedForMs: 12 * MIN }, '• changes locked for another 12 min after wrong passphrases'],
+  ] as const)('lists %s as something to look at', (_, status, service, line) => {
+    const html = health(base(status), serviceInfo(service));
+    expect(html).toMatch(/^🩺 <b>Health<\/b>: ⚠️ 1 thing\(s\) to look at/);
+    expect(html.split('\n')[1]).toBe(line);
+  });
+
+  it('does not count a poll under way, or one merely due, as a problem', () => {
+    expect(health(base({ lastPoll: { startedAt: minutesAgo(20), finishedAt: minutesAgo(18), ok: true } })).split('\n')[0]).toBe('🩺 <b>Health</b>: ✅ all good');
+    expect(health(base({ polling: true, lastPoll: { startedAt: minutesAgo(50), finishedAt: minutesAgo(40), ok: true } })).split('\n')[0]).toBe(
+      '🩺 <b>Health</b>: ✅ all good',
+    );
+  });
+
+  it('shows a pause (and when it ends), the watering on hold, and water that is on', () => {
+    const html = health(
       base({
-        paused: { since: minutesAgo(50), by: '@owner via Telegram' },
+        paused: { since: minutesAgo(50), by: '@owner via Telegram', until: new Date(NOW.getTime() + 70 * MIN) },
         sequences: [
           { id: 'a', deviceId: 'dev1', zoneNames: ['Front lawn'], nextCycle: 2, cycles: 3, dueAt: minutesAgo(20), attempts: 0, stale: false },
           { id: 'b', deviceId: 'dev2', zoneNames: ['Back lawn'], nextCycle: 3, cycles: 3, dueAt: minutesAgo(90), attempts: 0, stale: true },
@@ -265,10 +296,9 @@ describe('formatStatus', () => {
         ],
         wateringNow: [{ deviceId: 'dev1', zoneNames: ['Front lawn'], cycle: 1, of: 3, until: new Date(NOW.getTime() + 4 * MIN) }],
       }),
-      'UTC',
     );
     expect(html).toContain(
-      '⏸️ <b>Paused</b> since Jul 1, 11:10 by @owner via Telegram: no supplemental watering (sensors are still read and alerts still sent). /resume to resume.',
+      '⏸️ <b>Paused</b> since Jul 1, 11:10 by @owner via Telegram, until Jul 1, 13:10: no supplemental watering (sensors are still read and alerts still sent). /resume to resume sooner.',
     );
     expect(html).toContain(
       [
@@ -278,55 +308,230 @@ describe('formatStatus', () => {
         '⏸️ dev3: cycle 2/2 due Jul 1, 12:05',
       ].join('\n'),
     );
-    expect(html).toContain('<b>Water on now</b>\n💧 Front lawn: cycle 1/3 until Jul 1, 12:04');
+    expect(html).toContain('<b>Water on now</b> (/stop turns it off)\n💧 Front lawn: cycle 1/3 until Jul 1, 12:04');
+  });
+
+  it('shows a pause without an end', () => {
+    expect(health(base({ paused: { since: minutesAgo(50), by: '@owner via Telegram' } }))).toContain(
+      '⏸️ <b>Paused</b> since Jul 1, 11:10 by @owner via Telegram: no supplemental watering (sensors are still read and alerts still sent). /resume to resume.',
+    );
   });
 
   it('shows water on now without a pause, and a paused zone', () => {
-    const html = formatStatus(
+    const html = health(
       base({
         wateringNow: [{ deviceId: 'dev9', zoneNames: [], cycle: 2, of: 2, until: new Date(NOW.getTime() + MIN) }],
         zones: [{ key: 'dev1:1', name: 'Front', decision: { at: NOW, action: 'skip', reason: 'paused', detail: '', moisturePct: 20 } }],
       }),
-      'UTC',
     );
-    expect(html).toContain('<b>Water on now</b>\n💧 dev9: cycle 2/2 until Jul 1, 12:01');
-    expect(html).toContain('⏸️ Front: paused, soil 20%');
+    expect(html).toContain('<b>Water on now</b> (/stop turns it off)\n💧 dev9: cycle 2/2 until Jul 1, 12:01');
+    expect(html).toContain('1. ⏸️ Front: paused, soil 20%');
     expect(html).not.toContain('<b>Paused</b>');
   });
 
   it('says when monitoring is not running, or has not polled yet', () => {
     const { startedAt: _s, lastPoll: _l, nextPollAt: _n, ...rest } = base();
-    expect(formatStatus({ ...rest, running: false }, 'UTC')).toContain('⏹️ Monitoring is <b>not running</b>');
-    expect(formatStatus({ ...rest, startedAt: NOW }, 'UTC')).toContain('No poll has finished yet');
-    expect(formatStatus({ ...rest, startedAt: NOW, polling: true }, 'UTC')).not.toContain('No poll has finished yet');
+    expect(health({ ...rest, running: false })).toContain('⏹️ Monitoring is <b>not running</b>');
+    expect(health({ ...rest, startedAt: NOW })).toContain('No poll has finished yet');
+    expect(health({ ...rest, startedAt: NOW, polling: true })).not.toContain('No poll has finished yet');
   });
 
   it('flags a dry run', () => {
-    expect(formatStatus(base({ dryRun: true }), 'UTC').split('\n')[0]).toBe(
-      '🌱 <b>Lawn conductor status</b> (dry run: no watering commands are sent)',
-    );
+    expect(health(base({ dryRun: true })).split('\n')[1]).toBe('🧪 Dry run: no watering commands are sent.');
   });
 
-  it('escapes zone names, errors and alert keys', () => {
-    const html = formatStatus(
+  it('says when a file is missing, and leaves out notifications when there are none', () => {
+    const { notifications: _n, ...noNotifications } = serviceInfo({ files: [{ name: 'state' }] });
+    const html = health(base(), noNotifications);
+    expect(html).toContain('Files: state none yet');
+    expect(html).not.toContain('Notifications:');
+  });
+
+  it('escapes zone names, errors, alert keys and the service details', () => {
+    const html = health(
       base({
         lastPoll: { startedAt: NOW, finishedAt: NOW, ok: false, error: EVIL },
         zones: [{ key: EVIL, name: EVIL, decision: { at: NOW, action: 'skip', reason: EVIL, detail: EVIL } }],
         sequences: [{ id: EVIL, deviceId: EVIL, zoneNames: [EVIL], nextCycle: 1, cycles: 2, dueAt: NOW, attempts: 0, stale: false }],
         wateringNow: [{ deviceId: EVIL, zoneNames: [EVIL], cycle: 1, of: 2, until: NOW }],
-        paused: { since: NOW, by: EVIL },
-        outages: [{ service: 'tuya', since: NOW, failures: 1, lastError: EVIL }],
+        paused: { since: NOW, by: EVIL, until: NOW },
+        outages: [{ service: EVIL as ServiceName, since: NOW, failures: 1, lastError: EVIL }],
         alerts: [{ key: EVIL, state: EVIL, since: NOW }],
       }),
-      'UTC',
+      serviceInfo({ version: EVIL, node: EVIL, files: [{ name: EVIL, bytes: 1 }] }),
     );
     wellFormed(html);
   });
 
   it('stays within the message size limit with many zones', () => {
     const zones = Array.from({ length: 300 }, (_, i) => ({ key: `d:${i}`, name: `Zone ${i} ${'n'.repeat(150)}` }));
-    const html = formatStatus(base({ zones }), 'UTC');
+    const html = health(base({ zones }));
     expect(html.length).toBeLessThanOrEqual(MAX_REPLY_CHARS);
+    wellFormed(html);
+  });
+});
+
+describe('alertLabel', () => {
+  const names = new Map([
+    ['s1', 'Probe A'],
+    ['dev1', 'Front timer'],
+    ['dev1:1', 'Front lawn'],
+  ]);
+  it.each([
+    ['battery:sensor:s1', 'low', '🪫 low battery: sensor Probe A'],
+    ['battery:device:dev1', 'low', '🪫 low battery: controller Front timer'],
+    ['device:dev1', 'offline', '📴 controller Front timer offline'],
+    ['daily-limit:dev1:1', 'reached', '⏱️ Front lawn still dry after its daily allowance'],
+    ['moisture:dev1:1:s1', 'low', '🏜️ critically dry: Front lawn (sensor Probe A)'],
+    ['moisture:dev1:1:s1', 'high', '🌊 waterlogged: Front lawn (sensor Probe A)'],
+    ['moisture:dev1:1:s9', 'odd', '⚠️ odd: Front lawn (sensor s9)'],
+    ['battery:sensor:unknown', 'low', '🪫 low battery: sensor unknown'],
+    ['something:new', 'on', '⚠️ something:new: on'],
+  ])('%s (%s)', (key, state, label) => {
+    expect(alertLabel(key, state, names)).toBe(label);
+  });
+
+  it('escapes', () => {
+    wellFormed(alertLabel(`battery:sensor:${EVIL}`, 'low'));
+    wellFormed(alertLabel(EVIL, EVIL));
+  });
+});
+
+describe('parseDuration', () => {
+  const limits = { minMs: 5 * MIN, maxMs: 30 * 24 * 60 * MIN };
+  it.each([
+    ['90m', 90 * MIN],
+    ['30min', 30 * MIN],
+    ['4h', 240 * MIN],
+    [' 2D ', 2 * 24 * 60 * MIN],
+    ['1w', 7 * 24 * 60 * MIN],
+    ['30d', 30 * 24 * 60 * MIN],
+  ])('%j', (text, ms) => {
+    expect(parseDuration(text, limits)).toBe(ms);
+  });
+
+  it.each(['', '4', '4 h', '1.5h', '-2h', 'h4', '4hours', 'tomorrow', '2026-07-01'])('refuses %j', (text) => {
+    expect(parseDuration(text, limits)).toEqual({ problem: 'Give a time like 90m, 4h or 2d (between 5 min and 30 days).' });
+  });
+
+  it.each(['4m', '31d', '5w', '9999h'])('refuses %j as out of range', (text) => {
+    expect(parseDuration(text, limits)).toEqual({ problem: 'The time must be between 5 min and 30 days.' });
+  });
+
+  it('recognises the shape, whatever the range', () => {
+    expect(isDuration('9999d')).toBe(true);
+    expect(isDuration('9999 d')).toBe(false);
+  });
+});
+
+describe('size', () => {
+  it.each([
+    [0, '0 B'],
+    [1023, '1023 B'],
+    [2048, '2 KB'],
+    [1_234_567, '1.2 MB'],
+  ])('%d → %s', (bytes, text) => {
+    expect(size(bytes)).toBe(text);
+  });
+});
+
+describe('formatZone', () => {
+  const detail = (overrides: Partial<ZoneDetail> = {}): ZoneDetail => ({
+    at: NOW,
+    zone: {
+      key: 'dev1:1',
+      name: 'Front lawn',
+      deviceId: 'dev1',
+      station: 1,
+      thresholdPct: 30,
+      targetPct: 40,
+      runMinutes: 10,
+      maxMinutesPerDay: 30,
+      cooldownMinutes: 240,
+      maxCycleMinutes: 20,
+      soakMinutes: 30,
+      sensorAggregation: 'driest',
+      maxReadingAgeMinutes: 180,
+      criticalLowPct: 20,
+      criticalHighPct: 60,
+    },
+    decision: { at: minutesAgo(3), action: 'skip', reason: 'cooldown', detail: 'Probe A at 24% (threshold 30%), but in cooldown until 12:45' },
+    sensors: [
+      { id: 's1', name: 'Probe A', moisturePct: 24.04, temperatureC: 21.26, batteryPct: 80, at: minutesAgo(5) },
+      { id: 's2', name: 'Probe B', moisturePct: 12, at: minutesAgo(400), problem: 'stale (400 min old)' },
+      { id: 's3', problem: 'Tuya GET /v1.0/devices/s3 failed: code 1106 permission deny' },
+    ],
+    usedLastDayMinutes: 20,
+    lastRun: { at: minutesAgo(75), minutes: 10 },
+    cooldownUntil: new Date(NOW.getTime() + 45 * MIN),
+    alerts: [{ key: 'battery:sensor:s2', state: 'low', since: minutesAgo(600) }],
+    ...overrides,
+  });
+
+  it('shows everything about the zone: why, sensors, watering, settings, alerts', () => {
+    expect(formatZone(detail(), 'UTC')).toBe(
+      [
+        '🌱 <b>Front lawn</b> · controller dev1, station 1',
+        '🕒 <b>cooldown</b>: Probe A at 24% (threshold 30%), but in cooldown until 12:45 <i>(3 min ago)</i>',
+        '',
+        '<b>Sensors</b> (the driest sensor counts)',
+        '• Probe A: 💧 24% · 🌡️ 21.3°C · 🔋 80% · 5 min old',
+        '• Probe B: 💧 12% · 6.7 h old · ⚠️ not used: stale (400 min old)',
+        '• s3: ⚠️ Tuya GET /v1.0/devices/s3 failed: code 1106 permission deny',
+        '',
+        '<b>Watering</b>',
+        '• Last 24 h: 20 of 30 min used',
+        '• Last run: Jul 1, 10:45 (10 min)',
+        '• ⏳ Resting until Jul 1, 12:45 (cooldown)',
+        '',
+        '<b>Settings</b> (/config changes them)',
+        'Water below 30% · refill to 40% · runs of 10 min · up to 30 min a day · 4 h between runs · cycles of up to 20 min with 30 min soak · ' +
+          'alerts below 20% and above 60% · readings used up to 3 h old',
+        '',
+        '<b>Open alerts</b> (1)',
+        '🪫 low battery: sensor Probe B since Jul 1, 02:00',
+      ].join('\n'),
+    );
+  });
+
+  it('shows watering under way, a pause, and what is missing', () => {
+    const { decision: _d, lastRun: _l, cooldownUntil: _c, ...rest } = detail({ alerts: [] });
+    const html = formatZone(
+      {
+        ...rest,
+        paused: { since: minutesAgo(10), by: '@owner via Telegram' },
+        wateringNow: { deviceId: 'dev1', zoneNames: ['Front lawn'], cycle: 1, of: 3, until: new Date(NOW.getTime() + 8 * MIN) },
+        sequence: { id: 'q', deviceId: 'dev1', zoneNames: ['Front lawn', 'Back lawn'], nextCycle: 2, cycles: 3, dueAt: new Date(NOW.getTime() + 38 * MIN), attempts: 0, stale: false },
+      },
+      'UTC',
+    );
+    expect(html).toContain('No decision yet.');
+    expect(html).toContain('⏸️ <b>Paused</b> since Jul 1, 11:50 by @owner via Telegram');
+    expect(html).toContain('• No supplemental run recently');
+    expect(html).toContain('• 💧 Water on until Jul 1, 12:08 (cycle 1/3) · /stop turns it off');
+    expect(html).toContain('• ⏸️ Next cycle 2/3 on hold (on Front lawn, Back lawn)');
+    expect(html).not.toContain('Open alerts');
+    expect(html).not.toContain('Resting');
+  });
+
+  it('shows the next cycle when not paused', () => {
+    const html = formatZone(
+      detail({ sequence: { id: 'q', deviceId: 'dev1', zoneNames: ['Front lawn'], nextCycle: 2, cycles: 3, dueAt: new Date(NOW.getTime() + 38 * MIN), attempts: 0, stale: false } }),
+      'UTC',
+    );
+    expect(html).toContain('• 🔁 Next cycle 2/3 due Jul 1, 12:38 (on Front lawn)');
+  });
+
+  it('escapes what comes from sensors, settings and decisions', () => {
+    const html = formatZone(
+      detail({
+        zone: { ...detail().zone, name: EVIL, deviceId: EVIL, sensorAggregation: EVIL as 'driest' },
+        decision: { at: NOW, action: 'skip', reason: EVIL, detail: EVIL },
+        sensors: [{ id: EVIL, name: EVIL, moisturePct: 1, problem: EVIL }, { id: EVIL, problem: EVIL }],
+        alerts: [{ key: EVIL, state: EVIL, since: NOW }],
+      }),
+      'UTC',
+    );
     wellFormed(html);
   });
 });

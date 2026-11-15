@@ -1,23 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildCommands, zonesBySensor, type CommandDeps } from '../../bot/commands.ts';
 import { COMMAND_NAME } from '../../bot/conversation.ts';
-import type { ConductorStatus } from '../../conductor/monitor.ts';
 import { bhyveDevice, NOW, reading } from '../utils/conductor.ts';
+import { conductorStatus, serviceInfo } from '../utils/bot.ts';
 import { fakeBhyve } from '../utils/fake-bhyve.ts';
-
-const idleStatus = (): ConductorStatus => ({
-  at: NOW,
-  running: true,
-  dryRun: false,
-  pollIntervalMinutes: 15,
-  startedAt: NOW,
-  polling: false,
-  zones: [],
-  sequences: [],
-  wateringNow: [],
-  outages: [],
-  alerts: [],
-});
 
 const setup = (overrides: Partial<CommandDeps> = {}) => {
   const fake = fakeBhyve([bhyveDevice('dev1', { name: 'Front timer', zones: [{ station: 1, name: 'Front lawn' }] })]);
@@ -26,12 +12,13 @@ const setup = (overrides: Partial<CommandDeps> = {}) => {
     read: vi.fn(async () => [reading('s1', 31.25, { sensorName: 'Probe A' })]),
     lastErrors: [] as { sensorId: string; error: string }[],
   };
-  const status = vi.fn(idleStatus);
+  const status = vi.fn(() => conductorStatus({ startedAt: NOW }));
   const deps: CommandDeps = {
     bhyve: fake.bhyve,
     sensors,
     zonesBySensor: new Map([['s1', ['Front lawn']]]),
     status,
+    service: () => serviceInfo(),
     timeZone: 'UTC',
     now: () => NOW,
     ...overrides,
@@ -46,10 +33,10 @@ const setup = (overrides: Partial<CommandDeps> = {}) => {
 };
 
 describe('buildCommands', () => {
-  it('offers /status, /sensors_read and /bhyve_devices, mirroring the npm scripts', () => {
+  it('offers /health, /sensors_read and /bhyve_devices, mirroring the npm scripts', () => {
     const t = setup();
     expect(t.commands.map((c) => [c.name, c.script])).toEqual([
-      ['status', undefined],
+      ['health', undefined],
       ['sensors_read', 'sensors:read'],
       ['bhyve_devices', 'bhyve:devices'],
     ]);
@@ -59,9 +46,9 @@ describe('buildCommands', () => {
     }
   });
 
-  it('puts a cooldown on the commands that call cloud APIs, none on /status', () => {
+  it('puts a cooldown on the commands that call cloud APIs, none on /health', () => {
     const t = setup();
-    expect(t.get('status').cooldownSeconds).toBe(0);
+    expect(t.get('health').cooldownSeconds).toBe(0);
     expect(t.get('sensors_read').cooldownSeconds).toBeGreaterThanOrEqual(30);
     expect(t.get('bhyve_devices').cooldownSeconds).toBeGreaterThanOrEqual(30);
   });
@@ -98,11 +85,12 @@ describe('buildCommands', () => {
     expect(await t.get('sensors_read').run()).toContain('(1 of 1 read)');
   });
 
-  it('/status formats the monitor snapshot and makes no network calls', async () => {
+  it('/health formats the monitor snapshot and the service, and makes no network calls', async () => {
     const t = setup();
-    const html = await t.get('status').run();
+    const html = await t.get('health').run();
     expect(t.status).toHaveBeenCalledTimes(1);
-    expect(html).toContain('<b>Lawn conductor status</b>');
+    expect(html.split('\n')[0]).toBe('🩺 <b>Health</b>: ✅ all good');
+    expect(html).toContain('<b>Service</b>\nv1.0.0 · Node v22.21.0');
     expect(t.fake.bhyve.getDevices).not.toHaveBeenCalled();
     expect(t.sensors.read).not.toHaveBeenCalled();
   });

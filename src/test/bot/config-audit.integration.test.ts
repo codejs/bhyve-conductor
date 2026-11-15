@@ -6,7 +6,7 @@ import { FileAuditLog, readAuditTail } from '../../audit/audit.ts';
 import type { CommandPolicy } from '../../bot/auth.ts';
 import { CommandBot } from '../../bot/bot.ts';
 import { zonesBySensor } from '../../bot/commands.ts';
-import { buildBotCommands } from '../../bot/registry.ts';
+import { buildBotCommands, conductorCommandDeps } from '../../bot/registry.ts';
 import { VirtualClock } from '../../clock.ts';
 import { parseConductorConfig } from '../../conductor/config.ts';
 import { ConfigEditor } from '../../conductor/config-editor.ts';
@@ -14,6 +14,7 @@ import { WateringHistory } from '../../conductor/history.ts';
 import { Monitor } from '../../conductor/monitor.ts';
 import { log } from '../../log.ts';
 import { bhyveDevice, NOW, reading } from '../utils/conductor.ts';
+import { serviceInfo } from '../utils/bot.ts';
 import { fakeBhyve } from '../utils/fake-bhyve.ts';
 import { fakeBotApi, OWNER, updates } from '../utils/fake-telegram.ts';
 
@@ -65,20 +66,21 @@ describe('/config and /audit through Telegram (integration)', () => {
     const bot = new CommandBot({
       api: api.bot,
       policy: POLICY,
-      // Assembled exactly as index.ts does.
-      commands: buildBotCommands({
-        bhyve: { getDevices: () => fake.bhyve.getDevices() },
-        sensors: source,
-        zonesBySensor: zonesBySensor(config.zones),
-        status: () => monitor.status(),
-        timeZone: 'UTC',
-        now: () => clock.now(),
-        readAudit: () => readAuditTail(auditPath, 2 * 1024 * 1024),
-        changes: {
-          control: { status: () => monitor.status(), pause: (by) => monitor.pause(by), resume: (by, held) => monitor.resume(by, held) },
+      // Wired exactly as index.ts does.
+      commands: buildBotCommands(
+        conductorCommandDeps({
+          monitor,
+          config,
+          bhyve: fake.bhyve,
+          sensors: source,
+          zonesBySensor: zonesBySensor(config.zones),
+          readAudit: () => readAuditTail(auditPath, 2 * 1024 * 1024),
+          service: () => serviceInfo(),
+          timeZone: 'UTC',
+          now: () => clock.now(),
           editor: new ConfigEditor({ path: configPath, config, audit }),
-        },
-      }),
+        }),
+      ),
       passphrase: PASS,
       reply: () => {},
       audit,

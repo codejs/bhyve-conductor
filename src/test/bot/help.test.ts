@@ -2,41 +2,31 @@ import { describe, expect, it, vi } from 'vitest';
 import type { BotCommand, QueryCommand } from '../../bot/conversation.ts';
 import { MAX_REPLY_CHARS } from '../../bot/format.ts';
 import { BUILT_IN_HELP, helpFor, helpIndex } from '../../bot/help.ts';
-import { buildBotCommands, unavailableCommands, type BotCommandsDeps } from '../../bot/registry.ts';
-import { NOW } from '../utils/conductor.ts';
+import { buildBotCommands, unavailableCommands } from '../../bot/registry.ts';
+import { fakeBotDeps } from '../utils/bot.ts';
 
 const wellFormed = (html: string) => expect(html.replace(/<\/?(b|i|code)>/g, '')).not.toMatch(/[<>]/);
 
 /** The real commands, as the bot offers them (with or without a passphrase). */
-const real = (withChanges = true): BotCommand[] => {
-  const deps: BotCommandsDeps = {
-    bhyve: { getDevices: vi.fn(async () => []) },
-    sensors: { id: 'x', read: vi.fn(async () => []) },
-    zonesBySensor: new Map(),
-    status: vi.fn(),
-    timeZone: 'UTC',
-    now: () => NOW,
-    readAudit: vi.fn(async () => ({ events: [], skipped: 0, truncated: false })),
-    ...(withChanges
-      ? { changes: { control: { status: vi.fn(), pause: vi.fn(), resume: vi.fn() }, editor: { zones: () => [], preview: vi.fn(), apply: vi.fn() } } }
-      : {}),
-  };
-  return buildBotCommands(deps);
-};
+const real = (withChanges = true): BotCommand[] => buildBotCommands(fakeBotDeps({ changes: withChanges }));
 
 describe('helpIndex', () => {
   it('lists the read-only commands, then the changes, and how to get help on one', () => {
     expect(helpIndex(real())).toBe(
       [
         '🌱 <b>Lawn conductor commands</b>',
-        '/status: What the conductor is doing: polls, zones, watering, connections, alerts',
+        '/health: Is everything all right? Watering, zones, connections, alerts, and the service itself',
+        "/zone: Everything about one zone: why it did or didn't water, sensors, limits, settings",
         '/sensors_read: Read the soil sensors now <i>(like npm run sensors:read)</i>',
         '/bhyve_devices: B-hyve controllers: connection, battery, mode, rain delay, zones <i>(like npm run bhyve:devices)</i>',
         '/audit: What happened: the audit trail, a page at a time (e.g. /audit problems 7d)',
         '/help: this list, or how to use a command',
         '',
+        '<b>Safety</b> (asks you to confirm, no passphrase):',
+        '/stop: Turn the water off now (asks you to confirm)',
+        '',
         '<b>Changes</b> (each asks for the passphrase):',
-        '/pause: Pause automatic watering (asks for the passphrase)',
+        '/pause: Pause automatic watering, until /resume or for a while (asks for the passphrase)',
         '/resume: Resume automatic watering (asks for the passphrase)',
         "/config: Change a zone's watering settings (asks for the passphrase)",
         '/cancel: cancel a pending change',
@@ -100,6 +90,19 @@ describe('helpFor', () => {
     );
     expect(text).toContain('🔍 Read-only.');
     expect(text).toContain('Reply <b>done</b> (or /cancel) to close it; it also closes after 2 min without an answer.');
+  });
+
+  it('says a safety command only turns water off, needs no passphrase, and works while locked', () => {
+    const text = helpFor('stop', real());
+    expect(text).toContain('🛑 Safety: it only ever turns water off. It asks you to confirm (no passphrase), and works even while changes are locked.');
+    expect(text).toContain('<code>/stop 2</code>');
+    expect(text).not.toContain('🔐');
+  });
+
+  it('explains /status was replaced', () => {
+    expect(helpFor('status', real(), { unavailable: unavailableCommands({}) })).toBe(
+      '⛔ /status is off here: it was replaced by /health, which shows everything it did, and more.',
+    );
   });
 
   it('uses the real answer timeout', () => {
@@ -172,7 +175,8 @@ describe('every command documents itself', () => {
 
 describe('unavailableCommands', () => {
   it('names the changes when there is no passphrase, and nothing otherwise', () => {
-    expect([...unavailableCommands({}).keys()]).toEqual(['pause', 'resume', 'config']);
-    expect(unavailableCommands({ changes: { control: { status: vi.fn(), pause: vi.fn(), resume: vi.fn() }, editor: { zones: () => [], preview: vi.fn(), apply: vi.fn() } } }).size).toBe(0);
+    expect([...unavailableCommands({}).keys()]).toEqual(['status', 'pause', 'resume', 'config']);
+    expect([...unavailableCommands(fakeBotDeps({ changes: true })).keys()]).toEqual(['status']); // replaced by /health
+    expect(unavailableCommands({}).get('status')).toBe('it was replaced by /health, which shows everything it did, and more.');
   });
 });

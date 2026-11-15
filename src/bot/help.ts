@@ -40,8 +40,10 @@ export const HELP_ALIASES: ReadonlySet<string> = new Set(['help', 'start']);
 /** The list of commands: read-only ones first, then the ones that change something. */
 export const helpIndex = (commands: readonly BotCommand[]): string => {
   const line = (c: BotCommand) => `/${c.name}: ${safe(c.description)}${c.kind === 'query' && c.script ? ` <i>(like npm run ${safe(c.script, 40)})</i>` : ''}`;
-  const readOnly = commands.filter((c) => c.kind !== 'mutable');
+  const readOnly = commands.filter((c) => c.kind === 'query' || c.kind === 'interactive');
+  const safety = commands.filter((c) => c.kind === 'safety');
   const mutable = commands.filter((c) => c.kind === 'mutable');
+  const safetyLines = safety.length > 0 ? ['', '<b>Safety</b> (asks you to confirm, no passphrase):', ...safety.map(line)] : [];
   const conversations = commands.some((c) => c.kind !== 'query');
   const footer = ['', 'Send <b>/help</b> <i>command</i> to see how to use one, e.g. /help audit.'];
   if (mutable.length === 0) {
@@ -50,6 +52,7 @@ export const helpIndex = (commands: readonly BotCommand[]): string => {
       ...readOnly.map(line),
       '/help: this list, or how to use a command',
       ...(conversations ? ['/cancel: close what is waiting for your answer'] : []),
+      ...safetyLines,
       ...footer,
     ].join('\n');
   }
@@ -57,6 +60,7 @@ export const helpIndex = (commands: readonly BotCommand[]): string => {
     '🌱 <b>Lawn conductor commands</b>',
     ...readOnly.map(line),
     '/help: this list, or how to use a command',
+    ...safetyLines,
     '',
     '<b>Changes</b> (each asks for the passphrase):',
     ...mutable.map(line),
@@ -82,10 +86,13 @@ export const helpFor = (arg: string, commands: readonly BotCommand[], opts: Help
   if (!command) {
     const why = opts.unavailable?.get(name);
     // Only a known name is shown back (it's ours, not what was typed).
-    return why ? `⛔ /${name} is off here: ${safe(why)}` : "🤷 There's no command by that name. Send /help for the list.";
+    return why ? unavailableText(name, why) : "🤷 There's no command by that name. Send /help for the list.";
   }
   return render(command.name, command.description, command.help, notesFor(command, duration(opts.answerTimeoutMs ?? 120_000)));
 };
+
+/** A command that exists but is off here (no passphrase set), or was replaced: why. */
+export const unavailableText = (name: string, why: string): string => `⛔ /${safe(name, 32)} is off here: ${safe(why)}`;
 
 /** What follows from the command's kind and settings. */
 const notesFor = (c: BotCommand, wait: string): string[] => {
@@ -93,6 +100,9 @@ const notesFor = (c: BotCommand, wait: string): string[] => {
   if (c.kind === 'mutable') {
     notes.push('🔐 Changes something: it asks for the passphrase last, and nothing changes before that. Reply <b>cancel</b> (or /cancel) at any step.');
     notes.push(`⌛ Each question waits ${wait} for your answer.`);
+  } else if (c.kind === 'safety') {
+    notes.push('🛑 Safety: it only ever turns water off. It asks you to confirm (no passphrase), and works even while changes are locked.');
+    notes.push(`⌛ The question waits ${wait} for your answer.`);
   } else {
     notes.push('🔍 Read-only.');
   }

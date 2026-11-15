@@ -40,6 +40,8 @@ export class DeliveryQueue {
   #running = false;
   #idle: (() => void)[] = [];
   #stopped = false;
+  #delivered = 0;
+  #dropped = 0;
 
   constructor(transport: Transport, opts: Partial<QueueOptions> = {}, onDrop: (d: DropReason) => void = () => {}, clock: Clock = systemClock) {
     this.#transport = transport;
@@ -50,6 +52,16 @@ export class DeliveryQueue {
 
   get size(): number {
     return this.#items.length;
+  }
+
+  /** Messages delivered and dropped since start, and waiting now (a combined send counts each message). */
+  stats(): { delivered: number; failed: number; waiting: number } {
+    return { delivered: this.#delivered, failed: this.#dropped, waiting: this.#items.length };
+  }
+
+  #drop(d: DropReason): void {
+    this.#dropped++;
+    this.#onDrop(d);
   }
 
   enqueue(text: string): void {
@@ -63,7 +75,7 @@ export class DeliveryQueue {
   #trim(): void {
     while (this.#items.length > this.#opts.maxQueued) {
       const dropped = this.#items.shift();
-      if (dropped) this.#onDrop({ text: dropped.text, error: 'queue full', attempts: dropped.attempts });
+      if (dropped) this.#drop({ text: dropped.text, error: 'queue full', attempts: dropped.attempts });
     }
   }
 
@@ -76,7 +88,7 @@ export class DeliveryQueue {
   /** Stops delivering; anything still queued is dropped (and reported). */
   stop(): void {
     this.#stopped = true;
-    for (const item of this.#items.splice(0)) this.#onDrop({ text: item.text, error: 'stopped', attempts: item.attempts });
+    for (const item of this.#items.splice(0)) this.#drop({ text: item.text, error: 'stopped', attempts: item.attempts });
     for (const resolve of this.#idle.splice(0)) resolve();
   }
 
@@ -97,6 +109,7 @@ export class DeliveryQueue {
         if (!item) break;
         try {
           await this.#transport.send(batch.map((b) => b.text).join('\n\n'));
+          this.#delivered += batch.length;
           await this.#sleep(this.#opts.minIntervalMs);
         } catch (err) {
           const attempt = Math.max(...batch.map((b) => b.attempts)) + 1;
@@ -106,7 +119,7 @@ export class DeliveryQueue {
             err instanceof TelegramRateLimitError ? err.retryAfterSeconds * 1000 : this.#opts.retryDelaysMs[item.attempts - 1];
           if (err instanceof TelegramPermanentError || wait === undefined) {
             log.error(`Notification dropped after ${item.attempts} attempt(s): ${error}`);
-            for (const b of batch) this.#onDrop({ text: b.text, error, attempts: b.attempts });
+            for (const b of batch) this.#drop({ text: b.text, error, attempts: b.attempts });
             continue;
           }
           log.warn(`Notification failed (${error}); retrying in ${Math.round(wait / 1000)}s`);

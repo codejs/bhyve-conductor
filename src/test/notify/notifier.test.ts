@@ -294,6 +294,36 @@ describe('Notifier', () => {
       expect(t.texts()[0]).toContain('by &lt;b&gt;x&lt;/b&gt;');
     });
 
+    it('reminds of a pause that has gone on for days', () => {
+      const t = setup();
+      t.record('conductor.pause_reminder', { since: START.toISOString(), by: '@owner via Telegram', pausedHours: 50 });
+      t.record('conductor.pause_reminder', { since: START.toISOString(), by: '<b>', pausedHours: 20 });
+
+      expect(t.sent).toEqual([
+        expect.objectContaining({
+          severity: 'warning',
+          text: '⏸️ <b>Still paused</b> after 2 day(s) (since Jul 1, 07:00 by @owner via Telegram): no supplemental watering. Send /resume to resume.',
+        }),
+        expect.objectContaining({ text: expect.stringContaining('after 20 h (since Jul 1, 07:00 by &lt;b&gt;)') }),
+      ]);
+    });
+
+    it('says when a pause ended on its own (nobody is in the chat to be told), but not a /resume', () => {
+      const t = setup();
+      t.record('conductor.resumed', { by: 'the end of the pause', auto: true, pausedBy: '@owner via Telegram', pausedMinutes: 240 });
+      t.record('conductor.resumed', { by: '@owner via Telegram', pausedBy: '@owner via Telegram', pausedMinutes: 5 });
+
+      expect(t.texts()).toEqual(['▶️ <b>The pause is over</b> (set by @owner via Telegram): automatic watering is on again.']);
+    });
+
+    it('does not notify a stop or a changed pause end (the chat is answered directly)', () => {
+      const t = setup();
+      t.record('watering.stopped', { by: 'x', devices: [] });
+      t.record('conductor.pause_changed', { by: 'x', until: START.toISOString() });
+
+      expect(t.sent).toEqual([]);
+    });
+
     it('does not notify pauses, resumes or passphrase events (the chat is answered directly)', () => {
       const t = setup();
       t.record('conductor.paused', { by: 'x', held: [] });
